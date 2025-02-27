@@ -17,7 +17,9 @@ model:
   num_gnn_layers: 2
   num_mlp_layers: 2
   dropout: 0.2
-  gnn_type: 'gcn'
+  gnn_type: 'gat'  # 从'gcn'改为'gat'
+  focal_alpha: 0.25  # Focal Loss的alpha参数
+  focal_gamma: 2.0   # Focal Loss的gamma参数
 
 # 训练配置
 training:

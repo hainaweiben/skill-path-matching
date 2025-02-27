@@ -12,6 +12,67 @@ from torch_geometric.nn import GCNConv, SAGEConv, GATConv
 from torch_geometric.data import Data, Batch
 
 
+class FocalLoss(nn.Module):
+    """
+    Focal Loss for addressing class imbalance
+    
+    Focal Loss = -alpha * (1 - p_t)^gamma * log(p_t)
+    where p_t is the predicted probability of the target class
+    """
+    
+    def __init__(self, alpha=0.25, gamma=2.0, reduction='mean'):
+        """
+        Initialize Focal Loss
+        
+        Args:
+            alpha (float): Weighting factor for the rare class
+            gamma (float): Focusing parameter that reduces the loss contribution from easy examples
+            reduction (str): Reduction method, options: 'mean', 'sum', 'none'
+        """
+        super(FocalLoss, self).__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.reduction = reduction
+        self.eps = 1e-6  # Small constant to prevent numerical instability
+    
+    def forward(self, inputs, targets):
+        """
+        Forward pass
+        
+        Args:
+            inputs (torch.Tensor): Predicted probabilities, shape [batch_size]
+            targets (torch.Tensor): Target labels (0 or 1), shape [batch_size]
+            
+        Returns:
+            torch.Tensor: Focal loss
+        """
+        # Ensure inputs are between eps and 1-eps for numerical stability
+        inputs = torch.clamp(inputs, self.eps, 1.0 - self.eps)
+        
+        # Calculate binary cross entropy
+        bce_loss = F.binary_cross_entropy(inputs, targets, reduction='none')
+        
+        # Calculate p_t
+        p_t = inputs * targets + (1 - inputs) * (1 - targets)
+        
+        # Calculate focal weight
+        focal_weight = (1 - p_t) ** self.gamma
+        
+        # Apply alpha weighting
+        alpha_weight = self.alpha * targets + (1 - self.alpha) * (1 - targets)
+        
+        # Calculate focal loss
+        focal_loss = alpha_weight * focal_weight * bce_loss
+        
+        # Apply reduction
+        if self.reduction == 'mean':
+            return focal_loss.mean()
+        elif self.reduction == 'sum':
+            return focal_loss.sum()
+        else:  # 'none'
+            return focal_loss
+
+
 class SkillPathEncoder(nn.Module):
     """
     技能路径编码器
@@ -20,7 +81,7 @@ class SkillPathEncoder(nn.Module):
     """
     
     def __init__(self, input_dim, hidden_dim, output_dim, num_layers=2, dropout=0.1, 
-                 gnn_type='gcn'):
+                 gnn_type='gcn', heads=4):
         """
         初始化技能路径编码器
         
@@ -31,6 +92,7 @@ class SkillPathEncoder(nn.Module):
             num_layers (int): GNN层数
             dropout (float): Dropout概率
             gnn_type (str): GNN类型，可选 'gcn', 'sage', 'gat'
+            heads (int): GAT的注意力头数
         """
         super(SkillPathEncoder, self).__init__()
         
@@ -40,14 +102,22 @@ class SkillPathEncoder(nn.Module):
         self.num_layers = num_layers
         self.dropout = dropout
         self.gnn_type = gnn_type
+        self.heads = heads
         
         # 选择GNN类型
         if gnn_type == 'gcn':
             GNNLayer = GCNConv
+            self.gnn_kwargs = {}
         elif gnn_type == 'sage':
             GNNLayer = SAGEConv
+            self.gnn_kwargs = {}
         elif gnn_type == 'gat':
             GNNLayer = GATConv
+            self.gnn_kwargs = {'heads': heads}
+            # 调整维度以适应多头注意力
+            if num_layers > 1:
+                hidden_dim = hidden_dim // heads
+                output_dim = output_dim // heads
         else:
             raise ValueError(f"不支持的GNN类型: {gnn_type}")
         
@@ -55,15 +125,24 @@ class SkillPathEncoder(nn.Module):
         self.gnn_layers = nn.ModuleList()
         
         # 第一层: 输入维度 -> 隐藏维度
-        self.gnn_layers.append(GNNLayer(input_dim, hidden_dim))
+        if gnn_type == 'gat':
+            self.gnn_layers.append(GNNLayer(input_dim, hidden_dim, **self.gnn_kwargs))
+        else:
+            self.gnn_layers.append(GNNLayer(input_dim, hidden_dim))
         
         # 中间层: 隐藏维度 -> 隐藏维度
         for _ in range(num_layers - 2):
-            self.gnn_layers.append(GNNLayer(hidden_dim, hidden_dim))
+            if gnn_type == 'gat':
+                self.gnn_layers.append(GNNLayer(hidden_dim * heads, hidden_dim, **self.gnn_kwargs))
+            else:
+                self.gnn_layers.append(GNNLayer(hidden_dim, hidden_dim))
         
         # 最后一层: 隐藏维度 -> 输出维度
         if num_layers > 1:
-            self.gnn_layers.append(GNNLayer(hidden_dim, output_dim))
+            if gnn_type == 'gat':
+                self.gnn_layers.append(GNNLayer(hidden_dim * heads, output_dim, heads=1))
+            else:
+                self.gnn_layers.append(GNNLayer(hidden_dim, output_dim))
     
     def forward(self, x, edge_index, edge_attr=None):
         """
@@ -162,7 +241,7 @@ class SkillMatchingModel(nn.Module):
     
     def __init__(self, skill_input_dim, occupation_input_dim, hidden_dim=128, 
                  embedding_dim=64, num_gnn_layers=2, num_mlp_layers=2, 
-                 dropout=0.1, gnn_type='gcn'):
+                 dropout=0.1, gnn_type='gat', focal_alpha=0.25, focal_gamma=2.0):
         """
         初始化技能匹配模型
         
@@ -175,6 +254,8 @@ class SkillMatchingModel(nn.Module):
             num_mlp_layers (int): MLP层数
             dropout (float): Dropout概率
             gnn_type (str): GNN类型，可选 'gcn', 'sage', 'gat'
+            focal_alpha (float): Focal Loss的alpha参数
+            focal_gamma (float): Focal Loss的gamma参数
         """
         super(SkillMatchingModel, self).__init__()
         
@@ -185,7 +266,8 @@ class SkillMatchingModel(nn.Module):
             output_dim=embedding_dim,
             num_layers=num_gnn_layers,
             dropout=dropout,
-            gnn_type=gnn_type
+            gnn_type=gnn_type,
+            heads=4 if gnn_type == 'gat' else 1
         )
         
         # 职业编码器
@@ -211,7 +293,9 @@ class SkillMatchingModel(nn.Module):
         
         # 技能图
         self.skill_graph = None
-        self.loss_fn = nn.BCELoss()
+        
+        # 使用Focal Loss替代BCE Loss
+        self.loss_fn = FocalLoss(alpha=focal_alpha, gamma=focal_gamma)
     
     def forward(self, occupation_features, skill_idx, match=None, importance=None, level=None):
         """
@@ -280,7 +364,7 @@ class SkillPathMatchingModel(nn.Module):
     
     def __init__(self, skill_input_dim, occupation_input_dim, hidden_dim=128, 
                  embedding_dim=64, num_gnn_layers=2, num_mlp_layers=2, 
-                 dropout=0.1, gnn_type='gcn'):
+                 dropout=0.1, gnn_type='gat', focal_alpha=0.25, focal_gamma=2.0):
         """
         初始化技能路径匹配模型
         
@@ -293,6 +377,8 @@ class SkillPathMatchingModel(nn.Module):
             num_mlp_layers (int): MLP层数
             dropout (float): Dropout概率
             gnn_type (str): GNN类型，可选 'gcn', 'sage', 'gat'
+            focal_alpha (float): Focal Loss的alpha参数
+            focal_gamma (float): Focal Loss的gamma参数
         """
         super(SkillPathMatchingModel, self).__init__()
         
@@ -305,7 +391,9 @@ class SkillPathMatchingModel(nn.Module):
             num_gnn_layers=num_gnn_layers,
             num_mlp_layers=num_mlp_layers,
             dropout=dropout,
-            gnn_type=gnn_type
+            gnn_type=gnn_type,
+            focal_alpha=focal_alpha,
+            focal_gamma=focal_gamma
         )
         
         # 路径注意力层，用于关注技能路径中的重要技能
@@ -331,6 +419,9 @@ class SkillPathMatchingModel(nn.Module):
             nn.Linear(hidden_dim, 1),
             nn.Sigmoid()
         )
+        
+        # 使用Focal Loss
+        self.loss_fn = FocalLoss(alpha=focal_alpha, gamma=focal_gamma)
     
     def forward(self, skill_graph, occupation_features, skill_paths):
         """
@@ -421,7 +512,9 @@ def create_test_model(num_skills=35, num_occupation_features=10):
         num_gnn_layers=2,
         num_mlp_layers=2,
         dropout=0.1,
-        gnn_type='gcn'
+        gnn_type='gat',
+        focal_alpha=0.25,
+        focal_gamma=2.0
     )
     
     return model
