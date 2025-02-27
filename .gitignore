@@ -41,7 +41,16 @@ env/
 # 数据和输出
 data/raw/
 data/processed/
+data/visualizations/
 outputs/
+
+# 可视化文件
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.svg
+*.pdf
 
 # 日志
 *.log
