@@ -29,7 +29,6 @@ skill_path_matching/
 │   ├── raw/                # 原始数据
 │   └── processed/          # 处理后的数据
 ├── outputs/                # 模型输出和评估结果
-├── scripts/                # 旧版脚本（已弃用）
 ├── src/                    # 源代码
 │   ├── data_processing/    # 数据处理模块
 │   ├── evaluation/         # 评估模块
