@@ -162,6 +162,12 @@ class SkillPathEncoder(nn.Module):
         返回:
             torch.Tensor: 节点嵌入
         """
+        # 确保数据在同一设备上
+        device = x.device
+        edge_index = edge_index.to(device)
+        if edge_attr is not None:
+            edge_attr = edge_attr.to(device)
+            
         for i, gnn_layer in enumerate(self.gnn_layers):
             # 对于GAT，需要提供边特征
             if self.gnn_type == 'gat' and edge_attr is not None:
@@ -349,8 +355,12 @@ class SkillMatchingModel(nn.Module):
         if self.skill_graph is None:
             raise ValueError("技能图未设置，请先调用set_skill_graph方法")
         
-        # 获取技能图的节点特征和边索引
-        x, edge_index = self.skill_graph.x, self.skill_graph.edge_index
+        # 获取设备
+        device = occupation_features.device
+        
+        # 获取技能图的节点特征和边索引，并确保它们在正确的设备上
+        x = self.skill_graph.x.to(device)
+        edge_index = self.skill_graph.edge_index.to(device)
         
         # 使用技能路径编码器编码技能图
         skill_embeddings = self.skill_encoder(x, edge_index)
