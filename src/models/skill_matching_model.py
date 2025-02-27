@@ -117,7 +117,6 @@ class SkillPathEncoder(nn.Module):
             # 调整维度以适应多头注意力
             if num_layers > 1:
                 hidden_dim = hidden_dim // heads
-                output_dim = output_dim // heads
         else:
             raise ValueError(f"不支持的GNN类型: {gnn_type}")
         
@@ -140,9 +139,16 @@ class SkillPathEncoder(nn.Module):
         # 最后一层: 隐藏维度 -> 输出维度
         if num_layers > 1:
             if gnn_type == 'gat':
+                # 最后一层使用1个头，输出维度为output_dim
                 self.gnn_layers.append(GNNLayer(hidden_dim * heads, output_dim, heads=1))
             else:
                 self.gnn_layers.append(GNNLayer(hidden_dim, output_dim))
+        
+        # Dropout层
+        self.dropout_layer = nn.Dropout(dropout)
+        
+        # 激活函数
+        self.activation = nn.ReLU()
     
     def forward(self, x, edge_index, edge_attr=None):
         """
@@ -165,8 +171,8 @@ class SkillPathEncoder(nn.Module):
             
             # 除了最后一层外，应用ReLU和Dropout
             if i < len(self.gnn_layers) - 1:
-                x = F.relu(x)
-                x = F.dropout(x, p=self.dropout, training=self.training)
+                x = self.activation(x)
+                x = self.dropout_layer(x)
         
         return x
 
@@ -258,6 +264,11 @@ class SkillMatchingModel(nn.Module):
             focal_gamma (float): Focal Loss的gamma参数
         """
         super(SkillMatchingModel, self).__init__()
+        
+        # 确保embedding_dim是4的倍数，以便于GAT的多头注意力
+        if gnn_type == 'gat' and embedding_dim % 4 != 0:
+            embedding_dim = (embedding_dim // 4 + 1) * 4
+            print(f"调整embedding_dim为{embedding_dim}以适应GAT的4个注意力头")
         
         # 技能路径编码器
         self.skill_encoder = SkillPathEncoder(
@@ -382,6 +393,11 @@ class SkillPathMatchingModel(nn.Module):
         """
         super(SkillPathMatchingModel, self).__init__()
         
+        # 确保embedding_dim是4的倍数，以便于GAT的多头注意力
+        if gnn_type == 'gat' and embedding_dim % 4 != 0:
+            embedding_dim = (embedding_dim // 4 + 1) * 4
+            print(f"调整embedding_dim为{embedding_dim}以适应GAT的4个注意力头")
+            
         # 基本技能匹配模型
         self.base_model = SkillMatchingModel(
             skill_input_dim=skill_input_dim,
@@ -520,13 +536,19 @@ def create_test_model(num_skills=35, num_occupation_features=10):
     return model
 
 
-def get_device():
+def get_device(device_str=None):
     """
     获取可用的计算设备
     
+    参数:
+        device_str (str, optional): 指定的设备，如果为None则自动检测
+        
     返回:
         torch.device: 计算设备
     """
+    if device_str is not None:
+        return torch.device(device_str)
+        
     if torch.cuda.is_available():
         return torch.device('cuda')
     else:

@@ -13,7 +13,7 @@ model:
   skill_input_dim: 128
   occupation_input_dim: 128
   hidden_dim: 256
-  embedding_dim: 64
+  embedding_dim: 64  # 已经是4的倍数，适合GAT的4个注意力头
   num_gnn_layers: 2
   num_mlp_layers: 2
   dropout: 0.2
