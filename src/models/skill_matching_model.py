@@ -355,10 +355,7 @@ class SkillMatchingModel(nn.Module):
         if self.skill_graph is None:
             raise ValueError("技能图未设置，请先调用set_skill_graph方法")
         
-        # 获取设备
         device = occupation_features.device
-        
-        # 获取技能图的节点特征和边索引，并确保它们在正确的设备上
         x = self.skill_graph.x.to(device)
         edge_index = self.skill_graph.edge_index.to(device)
         

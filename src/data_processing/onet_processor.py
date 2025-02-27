@@ -329,10 +329,19 @@ class OnetProcessor:
         # 每个职业与其所需技能是正样本，与其他随机技能是负样本
         matching_samples = []
         
+        # 跟踪每个职业的样本数量，确保正负样本平衡
+        occupation_sample_counts = {}
+        
         for _, row in important_skills.iterrows():
+            occupation_code = row['occupation_code']
+            
+            # 初始化计数器
+            if occupation_code not in occupation_sample_counts:
+                occupation_sample_counts[occupation_code] = {'positive': 0, 'negative': 0}
+            
             # 正样本
             matching_samples.append({
-                'occupation_code': row['occupation_code'],
+                'occupation_code': occupation_code,
                 'skill_id': row['skill_id'],
                 'occupation_title': row['title'],
                 'skill_name': row['skill_name'],
@@ -340,29 +349,56 @@ class OnetProcessor:
                 'level': row['LV'],
                 'match': 1  # 匹配
             })
-            
-            # 为每个正样本生成一个负样本
-            # 随机选择一个不在当前职业所需技能列表中的技能
-            occupation_skill_ids = important_skills[important_skills['occupation_code'] == row['occupation_code']]['skill_id'].tolist()
+            occupation_sample_counts[occupation_code]['positive'] += 1
+        
+        # 为每个职业生成平衡的负样本
+        for occupation_code, counts in occupation_sample_counts.items():
+            # 获取该职业的所有技能ID
+            occupation_skill_ids = important_skills[important_skills['occupation_code'] == occupation_code]['skill_id'].tolist()
+            # 获取不在该职业技能列表中的技能
             non_occupation_skills = skills[~skills['skill_id'].isin(occupation_skill_ids)]
             
+            # 确定需要生成的负样本数量，确保与正样本数量相等
+            num_negative_samples = counts['positive']
+            
+            # 如果有足够的非职业技能，生成负样本
             if len(non_occupation_skills) > 0:
-                random_skill = non_occupation_skills.sample(1).iloc[0]
-                matching_samples.append({
-                    'occupation_code': row['occupation_code'],
-                    'skill_id': random_skill['skill_id'],
-                    'occupation_title': row['title'],
-                    'skill_name': random_skill['skill_name'],
-                    'importance': 0,
-                    'level': 0,
-                    'match': 0  # 不匹配
-                })
+                # 如果非职业技能数量少于需要的负样本数量，则进行有放回抽样
+                if len(non_occupation_skills) < num_negative_samples:
+                    negative_skills = non_occupation_skills.sample(num_negative_samples, replace=True)
+                else:
+                    negative_skills = non_occupation_skills.sample(num_negative_samples, replace=False)
+                
+                # 获取职业标题
+                occupation_title = occupations[occupations['occupation_code'] == occupation_code]['title'].iloc[0]
+                
+                # 为每个负样本添加到数据集
+                for _, skill_row in negative_skills.iterrows():
+                    matching_samples.append({
+                        'occupation_code': occupation_code,
+                        'skill_id': skill_row['skill_id'],
+                        'occupation_title': occupation_title,
+                        'skill_name': skill_row['skill_name'],
+                        'importance': 0,
+                        'level': 0,
+                        'match': 0  # 不匹配
+                    })
+                    occupation_sample_counts[occupation_code]['negative'] += 1
         
         # 转换为DataFrame并保存
         matching_df = pd.DataFrame(matching_samples)
+        
+        # 打乱数据顺序
+        matching_df = matching_df.sample(frac=1).reset_index(drop=True)
+        
+        # 保存数据集
         matching_df.to_csv(os.path.join(output_dir, 'skill_matching_dataset.csv'), index=False)
         
+        # 打印样本统计信息
+        total_positive = sum(counts['positive'] for counts in occupation_sample_counts.values())
+        total_negative = sum(counts['negative'] for counts in occupation_sample_counts.values())
         print(f"职位-技能匹配数据集已保存到 {output_dir}")
+        print(f"总样本数: {len(matching_df)}, 正样本: {total_positive}, 负样本: {total_negative}, 正负样本比例: {total_positive/total_negative:.2f}")
 
 
 if __name__ == "__main__":

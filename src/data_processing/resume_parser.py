@@ -163,10 +163,44 @@ class ResumeParser:
             # 使用NLP识别技能实体
             doc = nlp(skill_text)
             
-            # 提取可能的技能词汇（这里是简化实现）
-            skill_candidates = re.findall(r'([A-Za-z+#]+(?:\s[A-Za-z+#]+)*)', skill_text)
-            for candidate in skill_candidates:
-                if len(candidate) > 1 and candidate.lower() not in [s.lower() for s in skills]:
-                    skills.append(candidate)
+            # 提取可能的技能词汇（改进实现）
+            # 1. 识别更多的技术术语模式
+            tech_patterns = [
+                r'([A-Za-z+#]+(?:\s[A-Za-z+#]+)*)',  # 英文技术词汇
+                r'([A-Za-z+#]+[0-9]*\.[0-9]+(?:\s[A-Za-z+#]+)*)',  # 带版本号的技术
+                r'([A-Za-z+#]+\+\+)',  # C++等
+                r'([A-Za-z+#]+#)',  # C#等
+                r'([A-Za-z+#]+\.js)',  # Node.js等
+                r'([A-Za-z+#]+\.NET)',  # .NET等
+            ]
+            
+            for pattern in tech_patterns:
+                skill_candidates = re.findall(pattern, skill_text)
+                for candidate in skill_candidates:
+                    # 过滤掉太短或太长的候选词
+                    if 2 <= len(candidate) <= 30 and candidate.lower() not in [s.lower() for s in skills]:
+                        # 过滤掉常见的非技能词
+                        common_words = ['and', 'or', 'the', 'a', 'an', 'in', 'on', 'at', 'to', 'for', 'with', 'by']
+                        if candidate.lower() not in common_words:
+                            skills.append(candidate)
+            
+            # 2. 使用NLP识别专有名词和技术术语
+            for ent in doc.ents:
+                if ent.label_ in ['ORG', 'PRODUCT'] and ent.text not in skills:
+                    skills.append(ent.text)
+            
+            # 3. 识别中文技能
+            chinese_skill_patterns = [
+                r'([\u4e00-\u9fa5]{2,}技术)',
+                r'([\u4e00-\u9fa5]{2,}开发)',
+                r'([\u4e00-\u9fa5]{2,}设计)',
+                r'([\u4e00-\u9fa5]{2,}工程)',
+                r'([\u4e00-\u9fa5]{2,}分析)'
+            ]
+            
+            for pattern in chinese_skill_patterns:
+                chinese_skills = re.findall(pattern, skill_text)
+                skills.extend([s for s in chinese_skills if s not in skills])
         
-        return skills
+        # 去重并排序
+        return sorted(list(set(skills)))

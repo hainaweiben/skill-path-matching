@@ -74,6 +74,9 @@ class SkillMatchingDataset(Dataset):
         """
         # 获取唯一的职业代码
         unique_occupations = self.data['occupation_code'].unique()
+        
+        # 使用固定的随机种子以确保可重复性
+        np.random.seed(42)
         np.random.shuffle(unique_occupations)
         
         # 划分职业
@@ -88,6 +91,32 @@ class SkillMatchingDataset(Dataset):
         # 根据划分选择数据
         if self.split == 'train':
             self.data = self.data[self.data['occupation_code'].isin(train_occupations)]
+            
+            # 检查正负样本比例
+            positive_samples = self.data[self.data['match'] == 1]
+            negative_samples = self.data[self.data['match'] == 0]
+            pos_count = len(positive_samples)
+            neg_count = len(negative_samples)
+            
+            print(f"训练集正样本数: {pos_count}, 负样本数: {neg_count}, 比例: {pos_count/neg_count:.2f}")
+            
+            # 如果正负样本比例不平衡，进行重采样
+            if abs(pos_count / neg_count - 1.0) > 0.1:  # 如果比例偏差超过10%
+                # 确定目标样本数
+                target_count = max(pos_count, neg_count)
+                
+                # 对少数类进行过采样
+                if pos_count < neg_count:
+                    # 过采样正样本
+                    oversampled_positive = positive_samples.sample(target_count, replace=True, random_state=42)
+                    self.data = pd.concat([oversampled_positive, negative_samples]).sample(frac=1, random_state=42).reset_index(drop=True)
+                    print(f"对正样本进行过采样，新的样本数: {len(self.data)}")
+                else:
+                    # 过采样负样本
+                    oversampled_negative = negative_samples.sample(target_count, replace=True, random_state=42)
+                    self.data = pd.concat([positive_samples, oversampled_negative]).sample(frac=1, random_state=42).reset_index(drop=True)
+                    print(f"对负样本进行过采样，新的样本数: {len(self.data)}")
+                
         elif self.split == 'val':
             self.data = self.data[self.data['occupation_code'].isin(val_occupations)]
         elif self.split == 'test':
@@ -110,7 +139,40 @@ class SkillMatchingDataset(Dataset):
         
         # 创建节点特征
         num_nodes = len(nodes)
-        node_features = torch.randn(num_nodes, 128)  # 使用随机特征，实际应用中应使用真实特征
+        
+        # 使用更有意义的初始特征，而不是随机特征
+        # 1. 使用节点度数作为特征的一部分
+        node_degrees = {node['id']: 0 for node in nodes}
+        for edge in edges:
+            source_id = edge['source']
+            target_id = edge['target']
+            if source_id in node_degrees:
+                node_degrees[source_id] += 1
+            if target_id in node_degrees:
+                node_degrees[target_id] += 1
+        
+        # 2. 使用节点名称的嵌入作为特征
+        node_features = torch.zeros(num_nodes, 128)
+        
+        for i, node in enumerate(nodes):
+            # 使用节点度数作为特征的一部分
+            node_id = node['id']
+            degree = node_degrees[node_id] / max(max(node_degrees.values()), 1)  # 归一化
+            
+            # 使用节点名称的哈希值来初始化一部分特征
+            name = node.get('name', '')
+            name_hash = hash(name) % 1000000
+            
+            # 将度数和哈希值转换为特征向量
+            for j in range(64):  # 前64维使用哈希特征
+                node_features[i, j] = ((name_hash >> j) & 1) * 0.1
+            
+            # 后64维使用度数和随机特征
+            node_features[i, 64] = degree
+            
+            # 其余位置使用小的随机值
+            for j in range(65, 128):
+                node_features[i, j] = torch.randn(1).item() * 0.01
         
         # 创建边索引
         edge_index = []
