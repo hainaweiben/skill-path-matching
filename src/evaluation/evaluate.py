@@ -15,6 +15,7 @@ import pandas as pd
 import json
 from datetime import datetime
 import logging
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
 
 # 添加项目根目录到Python路径
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
@@ -61,9 +62,16 @@ def evaluate_model(model, data_loader, threshold=0.5, device=None):
     with torch.no_grad():
         for batch in data_loader:
             # 解包批次数据
-            occupation_features = batch['occupation_features'].to(device)
-            skill_idx = batch['skill_idx'].to(device)
-            labels = batch['match'].to(device)
+            if isinstance(batch, dict):
+                occupation_features = batch['occupation_features'].to(device)
+                skill_idx = batch['skill_idx'].to(device)
+                labels = batch['match'].to(device)
+            else:
+                # 如果batch是元组而不是字典
+                occupation_features, skill_idx, labels, _, _ = batch
+                occupation_features = occupation_features.to(device)
+                skill_idx = skill_idx.to(device)
+                labels = labels.to(device)
             
             # 前向传播
             scores, _ = model(occupation_features, skill_idx)
@@ -75,24 +83,18 @@ def evaluate_model(model, data_loader, threshold=0.5, device=None):
             all_labels.append(labels.cpu().numpy())
             all_scores.append(scores.cpu().numpy())
     
-    # 合并结果
+    # 合并所有批次的结果
     all_preds = np.concatenate(all_preds)
     all_labels = np.concatenate(all_labels)
     all_scores = np.concatenate(all_scores)
     
     # 计算评估指标
-    accuracy = np.mean(all_preds == all_labels)
-    precision = np.sum((all_preds == 1) & (all_labels == 1)) / (np.sum(all_preds == 1) + 1e-8)
-    recall = np.sum((all_preds == 1) & (all_labels == 1)) / (np.sum(all_labels == 1) + 1e-8)
-    f1 = 2 * precision * recall / (precision + recall + 1e-8)
-    
-    # 返回评估结果
     results = {
-        'accuracy': float(accuracy),
-        'precision': float(precision),
-        'recall': float(recall),
-        'f1': float(f1),
-        'threshold': threshold
+        'accuracy': accuracy_score(all_labels, all_preds),
+        'precision': precision_score(all_labels, all_preds),
+        'recall': recall_score(all_labels, all_preds),
+        'f1': f1_score(all_labels, all_preds),
+        'auc': roc_auc_score(all_labels, all_scores)
     }
     
     return results, all_preds, all_labels, all_scores
