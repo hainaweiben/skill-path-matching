@@ -1,0 +1,41 @@
+# 训练配置文件
+
+# 数据配置
+data:
+  data_dir: '/home/u2021201733/test/skill_path_matching/data'
+  skill_graph_path: 'data/processed/skill_graph.pkl'
+  dataset_args:
+    max_skill_path_length: 10
+    max_occupation_length: 5
+
+# 模型配置
+model:
+  skill_input_dim: 128
+  occupation_input_dim: 128
+  hidden_dim: 256
+  embedding_dim: 64
+  num_gnn_layers: 2
+  num_mlp_layers: 2
+  dropout: 0.2
+  gnn_type: 'gcn'
+
+# 训练配置
+training:
+  batch_size: 64
+  num_epochs: 50
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  num_workers: 4  # 数据加载线程数，根据CPU核心数调整
+  lr_scheduler:
+    type: 'ReduceLROnPlateau'
+    factor: 0.5
+    patience: 5
+
+# 训练器配置
+trainer:
+  early_stopping_patience: 10
+  gradient_clipping: 1.0
+  log_interval: 10
+  save_best_only: true
+  eval_metric: 'val_loss'
+  monitor_mode: 'min'

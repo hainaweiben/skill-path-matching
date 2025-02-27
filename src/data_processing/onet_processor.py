@@ -1,0 +1,385 @@
+"""
+O*NET数据处理模块
+用于处理O*NET数据库，提取技能、职业和关系信息
+"""
+
+import os
+import pandas as pd
+import numpy as np
+from typing import Dict, List, Tuple, Any, Union, Optional
+import networkx as nx
+import json
+
+class OnetProcessor:
+    """O*NET数据处理器"""
+    
+    def __init__(self, data_dir: str):
+        """
+        初始化处理器
+        
+        Args:
+            data_dir: O*NET数据目录
+        """
+        self.data_dir = data_dir
+        self.occupation_data = None
+        self.skills_data = None
+        self.knowledge_data = None
+        self.abilities_data = None
+        self.work_activities_data = None
+        self.skills_to_work_activities = None
+        
+    def load_data(self):
+        """加载O*NET数据"""
+        # 加载职业数据
+        self.occupation_data = pd.read_excel(
+            os.path.join(self.data_dir, 'Occupation Data.xlsx')
+        )
+        
+        # 加载技能数据
+        self.skills_data = pd.read_excel(
+            os.path.join(self.data_dir, 'Skills.xlsx')
+        )
+        
+        # 加载知识数据
+        self.knowledge_data = pd.read_excel(
+            os.path.join(self.data_dir, 'Knowledge.xlsx')
+        )
+        
+        # 加载能力数据
+        self.abilities_data = pd.read_excel(
+            os.path.join(self.data_dir, 'Abilities.xlsx')
+        )
+        
+        # 加载工作活动数据
+        self.work_activities_data = pd.read_excel(
+            os.path.join(self.data_dir, 'Work Activities.xlsx')
+        )
+        
+        # 加载技能到工作活动的映射
+        try:
+            self.skills_to_work_activities = pd.read_excel(
+                os.path.join(self.data_dir, 'Skills to Work Activities.xlsx')
+            )
+        except FileNotFoundError:
+            print("警告: 'Skills to Work Activities.xlsx' 文件不存在，将无法构建完整的技能关系图")
+            self.skills_to_work_activities = None
+        
+        print("数据加载完成")
+    
+    def process_occupations(self) -> pd.DataFrame:
+        """
+        处理职业数据
+        
+        Returns:
+            处理后的职业数据框
+        """
+        if self.occupation_data is None:
+            self.load_data()
+        
+        # 选择需要的列
+        occupations = self.occupation_data[['O*NET-SOC Code', 'Title', 'Description']].copy()
+        
+        # 重命名列
+        occupations.columns = ['occupation_code', 'title', 'description']
+        
+        return occupations
+    
+    def process_skills(self) -> pd.DataFrame:
+        """
+        处理技能数据
+        
+        Returns:
+            处理后的技能数据框
+        """
+        if self.skills_data is None:
+            self.load_data()
+        
+        # 获取唯一技能
+        unique_skills = self.skills_data[['Element ID', 'Element Name']].drop_duplicates()
+        
+        # 重命名列
+        unique_skills.columns = ['skill_id', 'skill_name']
+        
+        # 添加描述列（如果没有）
+        if 'description' not in unique_skills.columns:
+            unique_skills['description'] = "技能描述未提供"
+        
+        return unique_skills
+    
+    def process_occupation_skills(self) -> pd.DataFrame:
+        """
+        处理职业-技能关系数据
+        
+        Returns:
+            处理后的职业-技能关系数据框
+        """
+        if self.skills_data is None:
+            self.load_data()
+        
+        # 选择需要的列
+        occupation_skills = self.skills_data[['O*NET-SOC Code', 'Element ID', 'Scale ID', 'Data Value']].copy()
+        
+        # 重命名列
+        occupation_skills.columns = ['occupation_code', 'skill_id', 'scale_id', 'value']
+        
+        # 只保留重要性和水平评分
+        occupation_skills = occupation_skills[occupation_skills['scale_id'].isin(['IM', 'LV'])]
+        
+        # 转换为宽格式
+        occupation_skills_wide = occupation_skills.pivot_table(
+            index=['occupation_code', 'skill_id'],
+            columns='scale_id',
+            values='value'
+        ).reset_index()
+        
+        # 重命名列
+        occupation_skills_wide.columns.name = None
+        
+        return occupation_skills_wide
+    
+    def build_skill_graph(self) -> nx.DiGraph:
+        """
+        构建技能关系图
+        
+        Returns:
+            技能关系有向图
+        """
+        # 创建有向图
+        G = nx.DiGraph()
+        
+        # 获取唯一技能
+        unique_skills = self.process_skills()
+        
+        # 添加节点
+        for _, row in unique_skills.iterrows():
+            G.add_node(row['skill_id'], name=row['skill_name'], description=row['description'])
+        
+        # 如果有技能到工作活动的映射，则使用它来建立技能之间的关系
+        if self.skills_to_work_activities is not None:
+            # 通过工作活动建立技能之间的关系
+            # 如果两个技能关联到同一个工作活动，则它们之间有关系
+            skill_to_activity = self.skills_to_work_activities[['Skills Element ID', 'Work Activities Element ID']].copy()
+            skill_to_activity.columns = ['skill_id', 'activity_id']
+            
+            # 对于每个活动，找出相关的技能
+            activity_to_skills = {}
+            for _, row in skill_to_activity.iterrows():
+                activity_id = row['activity_id']
+                skill_id = row['skill_id']
+                
+                if activity_id not in activity_to_skills:
+                    activity_to_skills[activity_id] = []
+                
+                activity_to_skills[activity_id].append(skill_id)
+            
+            # 为相关的技能对添加边
+            for activity_id, skills in activity_to_skills.items():
+                for i in range(len(skills)):
+                    for j in range(i + 1, len(skills)):
+                        # 添加双向边
+                        if G.has_edge(skills[i], skills[j]):
+                            # 增加权重
+                            G[skills[i]][skills[j]]['weight'] += 1
+                        else:
+                            G.add_edge(skills[i], skills[j], weight=1, type='related')
+                        
+                        if G.has_edge(skills[j], skills[i]):
+                            G[skills[j]][skills[i]]['weight'] += 1
+                        else:
+                            G.add_edge(skills[j], skills[i], weight=1, type='related')
+        else:
+            # 如果没有技能到工作活动的映射，则使用职业-技能关系来建立技能之间的关系
+            # 如果两个技能经常出现在同一个职业中，则它们之间有关系
+            occupation_skills = self.process_occupation_skills()
+            
+            # 对于每个职业，找出相关的技能
+            occupation_to_skills = {}
+            for _, row in occupation_skills.iterrows():
+                occupation_code = row['occupation_code']
+                skill_id = row['skill_id']
+                
+                if occupation_code not in occupation_to_skills:
+                    occupation_to_skills[occupation_code] = []
+                
+                occupation_to_skills[occupation_code].append(skill_id)
+            
+            # 为相关的技能对添加边
+            for occupation_code, skills in occupation_to_skills.items():
+                for i in range(len(skills)):
+                    for j in range(i + 1, len(skills)):
+                        # 添加双向边
+                        if G.has_edge(skills[i], skills[j]):
+                            # 增加权重
+                            G[skills[i]][skills[j]]['weight'] += 1
+                        else:
+                            G.add_edge(skills[i], skills[j], weight=1, type='co-occurrence')
+                        
+                        if G.has_edge(skills[j], skills[i]):
+                            G[skills[j]][skills[i]]['weight'] += 1
+                        else:
+                            G.add_edge(skills[j], skills[i], weight=1, type='co-occurrence')
+        
+        return G
+    
+    def save_processed_data(self, output_dir: str):
+        """
+        保存处理后的数据
+        
+        Args:
+            output_dir: 输出目录
+        """
+        # 创建输出目录
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # 处理并保存职业数据
+        occupations = self.process_occupations()
+        occupations.to_csv(os.path.join(output_dir, 'occupations.csv'), index=False)
+        
+        # 处理并保存技能数据
+        skills = self.process_skills()
+        skills.to_csv(os.path.join(output_dir, 'skills.csv'), index=False)
+        
+        # 处理并保存职业-技能关系数据
+        occupation_skills = self.process_occupation_skills()
+        occupation_skills.to_csv(os.path.join(output_dir, 'occupation_skills.csv'), index=False)
+        
+        # 构建并保存技能图
+        skill_graph = self.build_skill_graph()
+        
+        # 保存为NetworkX支持的格式
+        nx.write_gexf(skill_graph, os.path.join(output_dir, 'skill_graph.gexf'))
+        
+        # 保存为JSON格式（节点和边）
+        graph_data = {
+            'nodes': [],
+            'edges': []
+        }
+        
+        for node, attrs in skill_graph.nodes(data=True):
+            graph_data['nodes'].append({
+                'id': node,
+                'name': attrs.get('name', ''),
+                'description': attrs.get('description', '')
+            })
+        
+        for source, target, attrs in skill_graph.edges(data=True):
+            graph_data['edges'].append({
+                'source': source,
+                'target': target,
+                'weight': attrs.get('weight', 1),
+                'type': attrs.get('type', '')
+            })
+        
+        with open(os.path.join(output_dir, 'skill_graph.json'), 'w') as f:
+            json.dump(graph_data, f, indent=2)
+        
+        print(f"处理后的数据已保存到 {output_dir}")
+    
+    def create_job_skill_dataset(self, output_dir: str, min_importance: float = 3.0):
+        """
+        创建职位-技能匹配数据集
+        
+        Args:
+            output_dir: 输出目录
+            min_importance: 最小重要性阈值
+        """
+        # 创建输出目录
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # 处理职业-技能关系数据
+        occupation_skills = self.process_occupation_skills()
+        
+        # 获取职业数据
+        occupations = self.process_occupations()
+        
+        # 获取技能数据
+        skills = self.process_skills()
+        
+        # 合并数据
+        merged_data = occupation_skills.merge(
+            occupations, on='occupation_code'
+        ).merge(
+            skills, on='skill_id'
+        )
+        
+        # 筛选重要的技能
+        important_skills = merged_data[merged_data['IM'] >= min_importance].copy()
+        
+        # 创建职位-技能矩阵
+        job_skill_matrix = pd.pivot_table(
+            important_skills,
+            values='IM',  # 使用重要性作为值
+            index='occupation_code',
+            columns='skill_id',
+            fill_value=0
+        )
+        
+        # 创建职位元数据
+        job_metadata = occupations.set_index('occupation_code')
+        
+        # 创建技能元数据
+        skill_metadata = skills.set_index('skill_id')
+        
+        # 保存数据
+        job_skill_matrix.to_csv(os.path.join(output_dir, 'job_skill_matrix.csv'))
+        job_metadata.to_csv(os.path.join(output_dir, 'job_metadata.csv'))
+        skill_metadata.to_csv(os.path.join(output_dir, 'skill_metadata.csv'))
+        
+        # 创建匹配样本
+        # 每个职业与其所需技能是正样本，与其他随机技能是负样本
+        matching_samples = []
+        
+        for _, row in important_skills.iterrows():
+            # 正样本
+            matching_samples.append({
+                'occupation_code': row['occupation_code'],
+                'skill_id': row['skill_id'],
+                'occupation_title': row['title'],
+                'skill_name': row['skill_name'],
+                'importance': row['IM'],
+                'level': row['LV'],
+                'match': 1  # 匹配
+            })
+            
+            # 为每个正样本生成一个负样本
+            # 随机选择一个不在当前职业所需技能列表中的技能
+            occupation_skill_ids = important_skills[important_skills['occupation_code'] == row['occupation_code']]['skill_id'].tolist()
+            non_occupation_skills = skills[~skills['skill_id'].isin(occupation_skill_ids)]
+            
+            if len(non_occupation_skills) > 0:
+                random_skill = non_occupation_skills.sample(1).iloc[0]
+                matching_samples.append({
+                    'occupation_code': row['occupation_code'],
+                    'skill_id': random_skill['skill_id'],
+                    'occupation_title': row['title'],
+                    'skill_name': random_skill['skill_name'],
+                    'importance': 0,
+                    'level': 0,
+                    'match': 0  # 不匹配
+                })
+        
+        # 转换为DataFrame并保存
+        matching_df = pd.DataFrame(matching_samples)
+        matching_df.to_csv(os.path.join(output_dir, 'skill_matching_dataset.csv'), index=False)
+        
+        print(f"职位-技能匹配数据集已保存到 {output_dir}")
+
+
+if __name__ == "__main__":
+    # 数据目录
+    data_dir = "/home/u2021201733/test/skill_path_matching/data/raw/db_27_0_excel"
+    
+    # 输出目录
+    output_dir = "/home/u2021201733/test/skill_path_matching/data/processed"
+    
+    # 创建处理器
+    processor = OnetProcessor(data_dir)
+    
+    # 加载数据
+    processor.load_data()
+    
+    # 保存处理后的数据
+    processor.save_processed_data(output_dir)
+    
+    # 创建职位-技能匹配数据集
+    processor.create_job_skill_dataset(output_dir)
