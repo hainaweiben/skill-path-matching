@@ -35,6 +35,7 @@ def parse_args():
     parser.add_argument('--config', type=str, required=True, help='配置文件路径')
     parser.add_argument('--resume', type=str, default=None, help='恢复训练的检查点路径')
     parser.add_argument('--output_dir', type=str, default='outputs', help='输出目录')
+    parser.add_argument('--device', type=str, default=None, help='计算设备 (cpu 或 cuda)')
     return parser.parse_args()
 
 def load_config(config_path):
@@ -61,7 +62,7 @@ def main():
         yaml.dump(config, f)
     
     # 获取设备
-    device = get_device()
+    device = get_device(args.device)
     logger.info(f"使用设备: {device}")
     
     # 加载数据集

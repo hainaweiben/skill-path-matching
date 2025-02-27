@@ -9,63 +9,57 @@ cd "$PROJECT_ROOT" || exit 1
 echo "===== 检查GPU可用性 ====="
 if [ -z "$(nvidia-smi 2>/dev/null)" ]; then
     echo "警告: 未检测到NVIDIA GPU，将使用CPU进行评估"
+    DEVICE="cpu"
 else
-    echo "使用设备: GPU"
+    echo "使用设备: cuda"
+    DEVICE="cuda"
 fi
 
-# 查找最新的模型输出目录
-LATEST_OUTPUT=$(ls -td outputs/2025*/ | head -1)
-if [ -z "$LATEST_OUTPUT" ]; then
-    echo "错误: 未找到模型输出目录"
+# 查找最新的模型目录
+LATEST_MODEL_DIR=$(find outputs -maxdepth 1 -type d -name "train_*" | sort -r | head -n 1)
+
+if [ -z "$LATEST_MODEL_DIR" ]; then
+    echo "错误: 未找到训练好的模型目录"
     exit 1
 fi
 
-echo "找到最新输出目录: $LATEST_OUTPUT"
-
-# 查找最新的训练运行目录
-LATEST_RUN=$(find "$LATEST_OUTPUT" -name "run_*" -type d | head -1)
-if [ -z "$LATEST_RUN" ]; then
-    echo "错误: 未找到训练运行目录"
-    exit 1
-fi
-
-echo "找到最新训练运行目录: $LATEST_RUN"
+echo "使用最新的模型目录: $LATEST_MODEL_DIR"
 
 # 查找模型文件
-MODEL_PATH="${LATEST_RUN}/best_model.pth"
-if [ ! -f "$MODEL_PATH" ]; then
-    echo "错误: 未找到模型文件 $MODEL_PATH"
+MODEL_FILE=$(find "$LATEST_MODEL_DIR" -name "best_model.pth")
+
+if [ -z "$MODEL_FILE" ]; then
+    echo "错误: 在 $LATEST_MODEL_DIR 中未找到模型文件"
     exit 1
 fi
 
-# 查找配置文件
-CONFIG_PATH="${LATEST_RUN}/config.yaml"
-if [ ! -f "$CONFIG_PATH" ]; then
-    echo "错误: 未找到配置文件 $CONFIG_PATH"
-    exit 1
-fi
+echo "使用模型文件: $MODEL_FILE"
 
 # 创建评估输出目录
+MODEL_TYPE=$(basename "$LATEST_MODEL_DIR" | cut -d'_' -f2)
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-EVAL_OUTPUT="outputs/evaluation_${TIMESTAMP}"
-mkdir -p "$EVAL_OUTPUT"
+OUTPUT_DIR="outputs/eval_${MODEL_TYPE}_${TIMESTAMP}"
+mkdir -p "$OUTPUT_DIR"
+echo "评估结果将保存到: $OUTPUT_DIR"
 
-echo "===== 开始评估模型 ====="
-echo "模型路径: $MODEL_PATH"
-echo "配置文件: $CONFIG_PATH"
-echo "输出目录: $EVAL_OUTPUT"
+# 创建日志文件
+LOG_FILE="${OUTPUT_DIR}/evaluation.log"
+touch "$LOG_FILE"
 
 # 运行评估脚本
+echo "===== 开始评估模型 ====="
 python src/evaluation/evaluate.py \
-    --model_path "$MODEL_PATH" \
-    --config_path "$CONFIG_PATH" \
-    --output_dir "$EVAL_OUTPUT" \
-    --threshold 0.5
+    --config configs/training_config.yaml \
+    --model_path "$MODEL_FILE" \
+    --output_dir "$OUTPUT_DIR" \
+    --device "$DEVICE" 2>&1 | tee "$LOG_FILE"
 
 # 检查评估是否成功
 if [ $? -eq 0 ]; then
     echo "===== 评估完成 ====="
-    echo "评估结果保存在: $EVAL_OUTPUT"
+    echo "评估结果保存在: $OUTPUT_DIR"
+    echo "日志文件: $LOG_FILE"
 else
     echo "===== 评估失败 ====="
+    echo "查看日志文件了解详情: $LOG_FILE"
 fi
