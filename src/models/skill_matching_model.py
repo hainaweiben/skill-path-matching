@@ -290,15 +290,38 @@ class SkillMatchingModel(nn.Module):
             dropout=dropout
         )
         
-        # 匹配预测层
+        # 特征交互层 - 使用注意力机制
+        self.cross_attention = nn.MultiheadAttention(
+            embed_dim=embedding_dim,
+            num_heads=4,
+            dropout=dropout
+        )
+        
+        # 特征增强层
+        self.feature_enhancement = nn.Sequential(
+            nn.Linear(embedding_dim * 3, hidden_dim),  # 包含原始特征和交互特征
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, embedding_dim),
+            nn.LayerNorm(embedding_dim)
+        )
+        
+        # 匹配预测层 - 更深的MLP
         self.matching_predictor = nn.Sequential(
             nn.Linear(embedding_dim * 2, hidden_dim),
+            nn.LayerNorm(hidden_dim),
             nn.ReLU(),
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.LayerNorm(hidden_dim // 2),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(hidden_dim // 2, 1),
+            nn.Linear(hidden_dim // 2, hidden_dim // 4),
+            nn.LayerNorm(hidden_dim // 4),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim // 4, 1),
             nn.Sigmoid()
         )
         
@@ -322,48 +345,61 @@ class SkillMatchingModel(nn.Module):
         返回:
             torch.Tensor: 匹配概率，形状为 [batch_size]
         """
-        # 确保技能图存在
-        if not hasattr(self, 'skill_graph'):
-            raise ValueError("模型缺少技能图，请先设置model.skill_graph")
+        # 确保技能图已设置
+        if self.skill_graph is None:
+            raise ValueError("技能图未设置，请先调用set_skill_graph方法")
         
-        # 将技能图移动到与输入相同的设备
-        device = occupation_features.device
-        skill_graph = self.skill_graph.to(device)
+        # 获取技能图的节点特征和边索引
+        x, edge_index = self.skill_graph.x, self.skill_graph.edge_index
         
-        # 使用GNN编码技能图
-        skill_node_embeddings = self.skill_encoder(skill_graph.x, skill_graph.edge_index, skill_graph.edge_attr)
+        # 使用技能路径编码器编码技能图
+        skill_embeddings = self.skill_encoder(x, edge_index)
         
         # 获取批次中每个技能的嵌入
-        batch_size = skill_idx.size(0)
-        skill_embeddings = skill_node_embeddings[skill_idx]
+        batch_skill_embeddings = skill_embeddings[skill_idx]
         
-        # 使用MLP编码职业特征
+        # 使用职业编码器编码职业特征
         occupation_embeddings = self.occupation_encoder(occupation_features)
         
-        # 计算匹配分数
-        match_scores = self.matching_predictor(
-            torch.cat([occupation_embeddings, skill_embeddings], dim=1)
+        # 使用注意力机制增强特征交互
+        # 将张量形状调整为注意力层所需的形状 [seq_len, batch_size, embedding_dim]
+        batch_skill_embeddings_reshaped = batch_skill_embeddings.unsqueeze(0)  # [1, batch_size, embedding_dim]
+        occupation_embeddings_reshaped = occupation_embeddings.unsqueeze(0)    # [1, batch_size, embedding_dim]
+        
+        # 计算交互特征
+        attn_output, _ = self.cross_attention(
+            batch_skill_embeddings_reshaped,
+            occupation_embeddings_reshaped,
+            occupation_embeddings_reshaped
         )
         
-        # 计算损失（如果提供了匹配标签）
+        # 调整形状回 [batch_size, embedding_dim]
+        attn_output = attn_output.squeeze(0)
+        
+        # 特征增强 - 结合原始特征和交互特征
+        enhanced_skill_features = self.feature_enhancement(
+            torch.cat([batch_skill_embeddings, attn_output, batch_skill_embeddings * attn_output], dim=1)
+        )
+        
+        # 连接职业嵌入和技能嵌入
+        combined_features = torch.cat([occupation_embeddings, enhanced_skill_features], dim=1)
+        
+        # 预测匹配概率
+        match_prob = self.matching_predictor(combined_features).squeeze(-1)
+        
+        # 如果提供了匹配标签，计算损失
         loss = None
         if match is not None:
-            loss = self.loss_fn(match_scores.squeeze(), match)
+            loss = self.loss_fn(match_prob, match)
             
-            # 如果提供了重要性，则对损失进行加权
-            if importance is not None:
-                loss = loss * importance
-                
-            # 如果提供了水平，则对损失进行加权
-            if level is not None:
-                # 将水平归一化到0-1范围
-                normalized_level = level / 5.0  # 假设水平范围为0-5
-                loss = loss * (1.0 + normalized_level)  # 高水平的样本损失权重更大
-                
-            # 计算平均损失
-            loss = loss.mean()
+            # 如果提供了重要性和水平，可以在这里使用它们进行加权
+            if importance is not None and level is not None:
+                # 根据重要性和水平调整损失权重
+                weights = importance * level
+                loss = loss * weights
+                loss = loss.mean()
         
-        return match_scores.squeeze(), loss
+        return match_prob, loss
 
 
 class SkillPathMatchingModel(nn.Module):

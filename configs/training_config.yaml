@@ -12,30 +12,30 @@ data:
 model:
   skill_input_dim: 128
   occupation_input_dim: 128
-  hidden_dim: 256
-  embedding_dim: 64  # 已经是4的倍数，适合GAT的4个注意力头
-  num_gnn_layers: 2
-  num_mlp_layers: 2
-  dropout: 0.2
-  gnn_type: 'gat'  # 从'gcn'改为'gat'
-  focal_alpha: 0.25  # Focal Loss的alpha参数
-  focal_gamma: 2.0   # Focal Loss的gamma参数
+  hidden_dim: 384
+  embedding_dim: 128
+  num_gnn_layers: 3
+  num_mlp_layers: 3
+  dropout: 0.3
+  gnn_type: 'gat'
+  focal_alpha: 0.35
+  focal_gamma: 2.5
 
 # 训练配置
 training:
-  batch_size: 64
-  num_epochs: 50
-  learning_rate: 0.001
-  weight_decay: 0.0001
-  num_workers: 4  # 数据加载线程数，根据CPU核心数调整
+  batch_size: 32
+  num_epochs: 100
+  learning_rate: 0.0005
+  weight_decay: 0.0005
+  num_workers: 4
   lr_scheduler:
-    type: 'ReduceLROnPlateau'
-    factor: 0.5
-    patience: 5
+    type: 'CosineAnnealingLR'
+    T_max: 50
+    eta_min: 0.00001
 
 # 训练器配置
 trainer:
-  early_stopping_patience: 10
+  early_stopping_patience: 15
   gradient_clipping: 1.0
   log_interval: 10
   save_best_only: true
