@@ -100,9 +100,6 @@ class OnetProcessor:
         # 重命名列
         unique_skills.columns = ['skill_id', 'skill_name']
         
-        # 添加描述列（如果没有）
-        if 'description' not in unique_skills.columns:
-            unique_skills['description'] = "技能描述未提供"
         
         return unique_skills
     
@@ -152,7 +149,7 @@ class OnetProcessor:
         
         # 添加节点
         for _, row in unique_skills.iterrows():
-            G.add_node(row['skill_id'], name=row['skill_name'], description=row['description'])
+            G.add_node(row['skill_id'], name=row['skill_name'])
         
         # 如果有技能到工作活动的映射，则使用它来建立技能之间的关系
         if self.skills_to_work_activities is not None:
@@ -231,95 +228,84 @@ class OnetProcessor:
         # 创建输出目录
         os.makedirs(output_dir, exist_ok=True)
         
-        # 处理并保存职业数据
+        # 保存处理后的职业数据
         occupations = self.process_occupations()
         occupations.to_csv(os.path.join(output_dir, 'occupations.csv'), index=False)
         
-        # 处理并保存技能数据
+        # 保存处理后的技能数据
         skills = self.process_skills()
         skills.to_csv(os.path.join(output_dir, 'skills.csv'), index=False)
         
-        # 处理并保存职业-技能关系数据
+        # 保存处理后的职业-技能关系数据
         occupation_skills = self.process_occupation_skills()
         occupation_skills.to_csv(os.path.join(output_dir, 'occupation_skills.csv'), index=False)
         
         # 构建并保存技能图
         skill_graph = self.build_skill_graph()
         
-        # 保存为NetworkX支持的格式
-        nx.write_gexf(skill_graph, os.path.join(output_dir, 'skill_graph.gexf'))
+        # 将NetworkX图转换为JSON格式
+        nodes = []
+        for node, data in skill_graph.nodes(data=True):
+            node_data = {'id': node}
+            node_data.update(data)
+            nodes.append(node_data)
         
-        # 保存为JSON格式（节点和边）
-        graph_data = {
-            'nodes': [],
-            'edges': []
-        }
+        edges = []
+        for u, v, data in skill_graph.edges(data=True):
+            edge_data = {'source': u, 'target': v}
+            edge_data.update(data)
+            edges.append(edge_data)
         
-        for node, attrs in skill_graph.nodes(data=True):
-            graph_data['nodes'].append({
-                'id': node,
-                'name': attrs.get('name', ''),
-                'description': attrs.get('description', '')
-            })
-        
-        for source, target, attrs in skill_graph.edges(data=True):
-            graph_data['edges'].append({
-                'source': source,
-                'target': target,
-                'weight': attrs.get('weight', 1),
-                'type': attrs.get('type', '')
-            })
-        
+        # 保存技能图
         with open(os.path.join(output_dir, 'skill_graph.json'), 'w') as f:
-            json.dump(graph_data, f, indent=2)
+            json.dump({'nodes': nodes, 'edges': edges}, f)
         
         print(f"处理后的数据已保存到 {output_dir}")
     
-    def create_job_skill_dataset(self, output_dir: str, min_importance: float = 3.0):
+    def generate_job_skill_dataset(self, output_dir: str):
         """
-        创建职位-技能匹配数据集
+        生成职位-技能数据集
         
         Args:
             output_dir: 输出目录
-            min_importance: 最小重要性阈值
         """
-        # 创建输出目录
-        os.makedirs(output_dir, exist_ok=True)
-        
-        # 处理职业-技能关系数据
+        # 获取处理后的数据
+        occupations = self.process_occupations()
+        skills = self.process_skills()
         occupation_skills = self.process_occupation_skills()
         
-        # 获取职业数据
-        occupations = self.process_occupations()
+        # 获取重要技能（重要性 >= 3.0）
+
+        important_skills = occupation_skills[occupation_skills['IM'] >= 2.0].copy()
         
-        # 获取技能数据
-        skills = self.process_skills()
-        
-        # 合并数据
-        merged_data = occupation_skills.merge(
-            occupations, on='occupation_code'
-        ).merge(
-            skills, on='skill_id'
+        # 合并职业和技能信息
+        important_skills = important_skills.merge(
+            occupations[['occupation_code', 'title']],
+            on='occupation_code',
+            how='left'
         )
         
-        # 筛选重要的技能
-        important_skills = merged_data[merged_data['IM'] >= min_importance].copy()
+        important_skills = important_skills.merge(
+            skills[['skill_id', 'skill_name']],
+            on='skill_id',
+            how='left'
+        )
         
-        # 创建职位-技能矩阵
-        job_skill_matrix = pd.pivot_table(
-            important_skills,
-            values='IM',  # 使用重要性作为值
+        # 创建职位-技能矩阵（假设每个 occupation_code 和 skill_id 组合唯一）
+        job_skill_matrix = occupation_skills.pivot_table(
+            values='IM',
             index='occupation_code',
             columns='skill_id',
+            aggfunc='first',  
             fill_value=0
         )
-        
+
         # 创建职位元数据
         job_metadata = occupations.set_index('occupation_code')
         
         # 创建技能元数据
         skill_metadata = skills.set_index('skill_id')
-        
+            
         # 保存数据
         job_skill_matrix.to_csv(os.path.join(output_dir, 'job_skill_matrix.csv'))
         job_metadata.to_csv(os.path.join(output_dir, 'job_metadata.csv'))
@@ -332,12 +318,24 @@ class OnetProcessor:
         # 跟踪每个职业的样本数量，确保正负样本平衡
         occupation_sample_counts = {}
         
+        # 计算每个职业的技能频率分布
+        occupation_skill_freq = {}
+        for occ_code in occupations['occupation_code'].unique():
+            occ_skills = occupation_skills[occupation_skills['occupation_code'] == occ_code]
+            total_importance = occ_skills['IM'].sum()
+            if total_importance > 0:
+                skill_freq = occ_skills.set_index('skill_id')['IM'] / total_importance
+                occupation_skill_freq[occ_code] = skill_freq.to_dict()
+        
         for _, row in important_skills.iterrows():
             occupation_code = row['occupation_code']
             
             # 初始化计数器
             if occupation_code not in occupation_sample_counts:
                 occupation_sample_counts[occupation_code] = {'positive': 0, 'negative': 0}
+            
+            # 计算技能在该职业中的相对重要性
+            skill_freq = occupation_skill_freq.get(occupation_code, {}).get(row['skill_id'], 0)
             
             # 正样本
             matching_samples.append({
@@ -347,6 +345,7 @@ class OnetProcessor:
                 'skill_name': row['skill_name'],
                 'importance': row['IM'],
                 'level': row['LV'],
+                'relative_importance': skill_freq,
                 'match': 1  # 匹配
             })
             occupation_sample_counts[occupation_code]['positive'] += 1
@@ -381,6 +380,7 @@ class OnetProcessor:
                         'skill_name': skill_row['skill_name'],
                         'importance': 0,
                         'level': 0,
+                        'relative_importance': 0,
                         'match': 0  # 不匹配
                     })
                     occupation_sample_counts[occupation_code]['negative'] += 1
@@ -399,23 +399,3 @@ class OnetProcessor:
         total_negative = sum(counts['negative'] for counts in occupation_sample_counts.values())
         print(f"职位-技能匹配数据集已保存到 {output_dir}")
         print(f"总样本数: {len(matching_df)}, 正样本: {total_positive}, 负样本: {total_negative}, 正负样本比例: {total_positive/total_negative:.2f}")
-
-
-if __name__ == "__main__":
-    # 数据目录
-    data_dir = "/home/u2021201733/test/skill_path_matching/data/raw/db_27_0_excel"
-    
-    # 输出目录
-    output_dir = "/home/u2021201733/test/skill_path_matching/data/processed"
-    
-    # 创建处理器
-    processor = OnetProcessor(data_dir)
-    
-    # 加载数据
-    processor.load_data()
-    
-    # 保存处理后的数据
-    processor.save_processed_data(output_dir)
-    
-    # 创建职位-技能匹配数据集
-    processor.create_job_skill_dataset(output_dir)

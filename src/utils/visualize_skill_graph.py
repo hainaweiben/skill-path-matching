@@ -16,7 +16,7 @@ G = nx.Graph()
 
 # Add nodes and edges
 for node in data['nodes']:
-    G.add_node(node['id'], name=node['name'], description=node['description'])
+    G.add_node(node['id'], name=node['name'])
 for edge in data['edges']:
     G.add_edge(edge['source'], edge['target'], weight=edge['weight'], type=edge['type'])
 

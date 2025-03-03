@@ -39,6 +39,7 @@ env/
 *.swo
 
 # 数据和输出
+models/
 data/raw/
 data/processed/
 data/visualizations/

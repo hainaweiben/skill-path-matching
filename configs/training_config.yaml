@@ -2,8 +2,8 @@
 
 # 数据配置
 data:
-  data_dir: '/home/u2021201733/test/skill_path_matching/data'
-  skill_graph_path: 'data/processed/skill_graph.pkl'
+  data_dir: '/home/u2021201733/test/skill_path_matching/data/processed'
+  skill_graph_path: '/home/u2021201733/test/skill_path_matching/data/processed/skill_graph.json'
   dataset_args:
     max_skill_path_length: 10
     max_occupation_length: 5
