@@ -11,7 +11,7 @@ data:
 # 模型配置
 model:
   skill_input_dim: 128
-  occupation_input_dim: 128
+  occupation_input_dim: 387
   hidden_dim: 256
   embedding_dim: 64
   num_gnn_layers: 2
