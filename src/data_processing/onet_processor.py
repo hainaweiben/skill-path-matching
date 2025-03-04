@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import json
 from networkx import DiGraph
+import itertools
 
 class OnetProcessor:
     """O*NET数据处理器"""
@@ -44,37 +45,60 @@ class OnetProcessor:
             'education_data': 'Education, Training, and Experience.xlsx',
             'work_context_data': 'Work Context.xlsx'
         }
+        data_frames = {}
         for attr, file_name in data_files.items():
             file_path = os.path.join(self.data_dir, file_name)
             try:
-                data = pd.read_excel(file_path)
-                setattr(self, attr, data)
+                data_frames[attr] = pd.read_excel(file_path)
                 print(f"成功加载: {file_name}")
             except FileNotFoundError:
                 print(f"警告: {file_name} 文件不存在")
-                setattr(self, attr, None)
+                data_frames[attr] = None
+            except Exception as e:
+                print(f"错误: {file_name} 加载失败，原因: {e}")
+                data_frames[attr] = None
+        self.occupation_data = data_frames['occupation_data']
+        self.skills_data = data_frames['skills_data']
+        self.knowledge_data = data_frames['knowledge_data']
+        self.abilities_data = data_frames['abilities_data']
+        self.work_activities_data = data_frames['work_activities_data']
+        self.skills_to_work_activities = data_frames['skills_to_work_activities']
+        self.tech_skills_data = data_frames['tech_skills_data']
+        self.task_statements_data = data_frames['task_statements_data']
+        self.tools_used_data = data_frames['tools_used_data']
+        self.task_ratings_data = data_frames['task_ratings_data']
+        self.education_data = data_frames['education_data']
+        self.work_context_data = data_frames['work_context_data']
         print("数据加载完成")
 
-    def _rename_columns(self, df: pd.DataFrame, column_mapping: dict) -> pd.DataFrame:
-        """重命名DataFrame的列"""
-        df.rename(columns=column_mapping, inplace=True)
-        return df
+    def _process_data(self, df: pd.DataFrame, column_mapping: dict) -> pd.DataFrame:
+        """处理数据，重命名列并去重"""
+        try:
+            df.rename(columns=column_mapping, inplace=True)
+            return df.drop_duplicates()
+        except Exception as e:
+            print(f"错误: 数据处理失败，原因: {e}")
+            return df
 
     def _filter_by_column_values(self, df: pd.DataFrame, column: str, values: list) -> pd.DataFrame:
         """根据列值过滤DataFrame"""
-        return df[df[column].isin(values)]
+        try:
+            return df[df[column].isin(values)]
+        except Exception as e:
+            print(f"错误: 数据过滤失败，原因: {e}")
+            return df
 
     def _process_occupation_data(self) -> pd.DataFrame:
         """处理职业数据"""
         if self.occupation_data is None:
             return pd.DataFrame()
         occupations = self.occupation_data[['O*NET-SOC Code', 'Title', 'Description']].copy()
-        occupations = self._rename_columns(occupations, {'O*NET-SOC Code': 'occupation_code', 'Title': 'title', 'Description': 'description'})
+        occupations = self._process_data(occupations, {'O*NET-SOC Code': 'occupation_code', 'Title': 'title', 'Description': 'description'})
         return occupations
 
     def _process_single_attribute_type(self, data: pd.DataFrame) -> pd.DataFrame:
         """处理单类型属性数据，如 Knowledge, Abilities, Work Activities, Work Context"""
-        return data[['Element ID', 'Element Name']].drop_duplicates().copy()
+        return self._process_data(data[['Element ID', 'Element Name']].copy(), {'Element ID': 'id', 'Element Name': 'name'})
 
     def process_occupations(self) -> pd.DataFrame:
         """处理职业数据"""
@@ -93,7 +117,7 @@ class OnetProcessor:
         if self.skills_data is None:
             self.load_data()
         occupation_skills = self.skills_data[['O*NET-SOC Code', 'Element ID', 'Scale ID', 'Data Value']].copy()
-        occupation_skills = self._rename_columns(occupation_skills, {'O*NET-SOC Code': 'occupation_code', 'Element ID': 'skill_id', 'Scale ID': 'scale_id', 'Data Value': 'value'})
+        occupation_skills = self._process_data(occupation_skills, {'O*NET-SOC Code': 'occupation_code', 'Element ID': 'skill_id', 'Scale ID': 'scale_id', 'Data Value': 'value'})
         occupation_skills = self._filter_by_column_values(occupation_skills, 'scale_id', ['IM', 'LV'])
         occupation_skills_wide = occupation_skills.pivot_table(
             index=['occupation_code', 'skill_id'],
@@ -173,10 +197,9 @@ class OnetProcessor:
                 activity_to_skills[activity_id].append(skill_id)
             for skills in activity_to_skills.values():
                 if len(skills) > 1:
-                    for i in range(len(skills)):
-                        for j in range(i + 1, len(skills)):
-                            G.add_edge(skills[i], skills[j], weight=1)
-                            G.add_edge(skills[j], skills[i], weight=1)
+                    for skill_pair in itertools.combinations(skills, 2):
+                        G.add_edge(skill_pair[0], skill_pair[1], weight=1)
+                        G.add_edge(skill_pair[1], skill_pair[0], weight=1)
         else:
             occupation_skills = self.process_occupation_skills()
             occ_to_skills = {}
@@ -189,10 +212,9 @@ class OnetProcessor:
             for skills in occ_to_skills.values():
                 if len(skills) > 1:
                     skills_list = list(skills)
-                    for i in range(len(skills_list)):
-                        for j in range(i + 1, len(skills_list)):
-                            G.add_edge(skills_list[i], skills_list[j], weight=1)
-                            G.add_edge(skills_list[j], skills_list[i], weight=1)
+                    for skill_pair in itertools.combinations(skills_list, 2):
+                        G.add_edge(skill_pair[0], skill_pair[1], weight=1)
+                        G.add_edge(skill_pair[1], skill_pair[0], weight=1)
         return G
 
     def save_processed_data(self, output_dir: str):
