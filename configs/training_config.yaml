@@ -12,7 +12,7 @@ data:
 model:
   skill_input_dim: 128
   occupation_input_dim: 387
-  hidden_dim: 256
+  hidden_dim: 64
   embedding_dim: 64
   num_gnn_layers: 2
   num_mlp_layers: 2

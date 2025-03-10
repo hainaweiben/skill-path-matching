@@ -169,20 +169,36 @@ class SkillMatchingDataset(Dataset):
     def build_skill_graph(self):
         """构建技能图，生成节点特征并构建边数据"""
         self.logger.info("开始构建技能图...")
+        # 获取原始节点数据
+        raw_nodes = self.skill_graph_data.get('nodes', [])
+        
+        # 处理节点数据 - 将列表格式 [id, {属性}] 转换为字典格式 {id: id, ...属性}
+        processed_nodes = []
+        for node_data in raw_nodes:
+            if isinstance(node_data, list) and len(node_data) == 2:
+                node_id, node_attrs = node_data
+                node_dict = {'id': node_id}
+                if isinstance(node_attrs, dict):
+                    node_dict.update(node_attrs)
+                processed_nodes.append(node_dict)
+            elif isinstance(node_data, dict) and 'id' in node_data:
+                # 如果已经是字典格式，直接使用
+                processed_nodes.append(node_data)
+        
         # 增加一个“未知技能”节点，确保所有技能都有对应特征
-        nodes = self.skill_graph_data.get('nodes', []) + [{
+        processed_nodes.append({
             'id': 'UNK', 
             'name': 'Unknown Skill',
             'type': 'unknown'
-        }]
-        self.node_id_to_idx = {node['id']: i for i, node in enumerate(nodes)}
+        })
+        self.node_id_to_idx = {node['id']: i for i, node in enumerate(processed_nodes)}
         self.node_idx_to_id = {i: node_id for node_id, i in self.node_id_to_idx.items()}
-        num_nodes = len(nodes)
+        num_nodes = len(processed_nodes)
         # 如果使用词向量，维度根据词向量调整，否则默认128维
         feature_dim = self.word2vec.vector_size if self.word2vec else 128
         node_features = np.zeros((num_nodes, feature_dim), dtype=np.float32)
         
-        for i, node in enumerate(nodes):
+        for i, node in enumerate(processed_nodes):
             # 使用词向量生成节点特征
             if self.word2vec:
                 name = node.get('name', '')
@@ -204,20 +220,50 @@ class SkillMatchingDataset(Dataset):
         node_features = torch.tensor(node_features, dtype=torch.float)
         # 构建边索引
         edge_index = []
-        for edge in self.skill_graph_data.get('edges', []):
-            src = self.node_id_to_idx.get(edge['source'], self.node_id_to_idx['UNK'])
-            tgt = self.node_id_to_idx.get(edge['target'], self.node_id_to_idx['UNK'])
+        edge_attr = []
+        for edge_data in self.skill_graph_data.get('edges', []):
+            # 处理边数据 - 将列表格式 [source_id, target_id, {属性}] 转换为所需格式
+            if isinstance(edge_data, list):
+                if len(edge_data) >= 2:
+                    source_id, target_id = edge_data[0], edge_data[1]
+                    # 获取边属性（如果存在）
+                    edge_attrs = edge_data[2] if len(edge_data) > 2 and isinstance(edge_data[2], dict) else {}
+                else:
+                    continue  # 跳过无效的边数据
+            elif isinstance(edge_data, dict) and 'source' in edge_data and 'target' in edge_data:
+                # 如果已经是字典格式，直接使用
+                source_id, target_id = edge_data['source'], edge_data['target']
+                edge_attrs = {k: v for k, v in edge_data.items() if k not in ['source', 'target']}
+            else:
+                continue  # 跳过无效的边数据
+                
+            # 获取节点索引
+            src = self.node_id_to_idx.get(source_id, self.node_id_to_idx['UNK'])
+            tgt = self.node_id_to_idx.get(target_id, self.node_id_to_idx['UNK'])
             edge_index.append([src, tgt])
+            
+            # 提取边权重作为边属性（如果存在）
+            weight = edge_attrs.get('weight', 1.0)
+            edge_attr.append([float(weight)])
         if edge_index:
             edge_index = torch.tensor(edge_index, dtype=torch.long).t().contiguous()
         else:
             edge_index = torch.empty((2, 0), dtype=torch.long)
         # 构建图数据对象
-        self.skill_graph = Data(
-            x=node_features,
-            edge_index=edge_index,
-            num_nodes=num_nodes
-        )
+        if edge_attr:
+            edge_attr = torch.tensor(edge_attr, dtype=torch.float)
+            self.skill_graph = Data(
+                x=node_features,
+                edge_index=edge_index,
+                edge_attr=edge_attr,
+                num_nodes=num_nodes
+            )
+        else:
+            self.skill_graph = Data(
+                x=node_features,
+                edge_index=edge_index,
+                num_nodes=num_nodes
+            )
         self.logger.info(f"技能图构建完成：{num_nodes} 个节点，{edge_index.shape[1]} 条边")
 
     def generate_basic_features(self, node):

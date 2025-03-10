@@ -39,7 +39,7 @@ env/
 *.swo
 
 # 数据和输出
-models/
+word2vec-models/
 data/raw/
 data/processed/
 data/visualizations/

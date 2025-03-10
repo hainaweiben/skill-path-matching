@@ -78,10 +78,11 @@ class SkillPathEncoder(nn.Module):
     技能路径编码器
     
     使用图神经网络对技能图进行编码，学习技能之间的关系。
+    增强版本支持有序消息传递和边特征处理。
     """
     
     def __init__(self, input_dim, hidden_dim, output_dim, num_layers=2, dropout=0.1, 
-                 gnn_type='gcn', heads=4):
+                 gnn_type='gcn', heads=4, edge_dim=None, use_ordered_msg_passing=True):
         """
         初始化技能路径编码器
         
@@ -93,6 +94,8 @@ class SkillPathEncoder(nn.Module):
             dropout (float): Dropout概率
             gnn_type (str): GNN类型，可选 'gcn', 'sage', 'gat'
             heads (int): GAT的注意力头数
+            edge_dim (int, optional): 边特征维度，如果为None则不使用边特征
+            use_ordered_msg_passing (bool): 是否使用有序消息传递
         """
         super(SkillPathEncoder, self).__init__()
         
@@ -103,6 +106,8 @@ class SkillPathEncoder(nn.Module):
         self.dropout = dropout
         self.gnn_type = gnn_type
         self.heads = heads
+        self.edge_dim = edge_dim
+        self.use_ordered_msg_passing = use_ordered_msg_passing
         
         # 选择GNN类型
         if gnn_type == 'gcn':
@@ -123,16 +128,31 @@ class SkillPathEncoder(nn.Module):
         # 构建GNN层
         self.gnn_layers = nn.ModuleList()
         
+        # 边特征转换层 - 将边特征转换为适合GNN使用的格式
+        if edge_dim is not None:
+            self.edge_encoders = nn.ModuleList()
+            for i in range(num_layers):
+                if i == 0:
+                    self.edge_encoders.append(nn.Linear(edge_dim, hidden_dim))
+                else:
+                    self.edge_encoders.append(nn.Linear(edge_dim, hidden_dim))
+        
         # 第一层: 输入维度 -> 隐藏维度
         if gnn_type == 'gat':
-            self.gnn_layers.append(GNNLayer(input_dim, hidden_dim, **self.gnn_kwargs))
+            if edge_dim is not None:
+                self.gnn_layers.append(GNNLayer(input_dim, hidden_dim, edge_dim=hidden_dim, **self.gnn_kwargs))
+            else:
+                self.gnn_layers.append(GNNLayer(input_dim, hidden_dim, **self.gnn_kwargs))
         else:
             self.gnn_layers.append(GNNLayer(input_dim, hidden_dim))
         
         # 中间层: 隐藏维度 -> 隐藏维度
         for _ in range(num_layers - 2):
             if gnn_type == 'gat':
-                self.gnn_layers.append(GNNLayer(hidden_dim * heads, hidden_dim, **self.gnn_kwargs))
+                if edge_dim is not None:
+                    self.gnn_layers.append(GNNLayer(hidden_dim * heads, hidden_dim, edge_dim=hidden_dim, **self.gnn_kwargs))
+                else:
+                    self.gnn_layers.append(GNNLayer(hidden_dim * heads, hidden_dim, **self.gnn_kwargs))
             else:
                 self.gnn_layers.append(GNNLayer(hidden_dim, hidden_dim))
         
@@ -140,9 +160,23 @@ class SkillPathEncoder(nn.Module):
         if num_layers > 1:
             if gnn_type == 'gat':
                 # 最后一层使用1个头，输出维度为output_dim
-                self.gnn_layers.append(GNNLayer(hidden_dim * heads, output_dim, heads=1))
+                if edge_dim is not None:
+                    self.gnn_layers.append(GNNLayer(hidden_dim * heads, output_dim, edge_dim=hidden_dim, heads=1))
+                else:
+                    self.gnn_layers.append(GNNLayer(hidden_dim * heads, output_dim, heads=1))
             else:
                 self.gnn_layers.append(GNNLayer(hidden_dim, output_dim))
+        
+        # 有序消息传递的注意力层
+        if use_ordered_msg_passing:
+            self.order_attention = nn.ModuleList()
+            for i in range(num_layers):
+                if i == 0:
+                    self.order_attention.append(nn.Linear(input_dim, 1))
+                elif i == num_layers - 1:
+                    self.order_attention.append(nn.Linear(output_dim, 1))
+                else:
+                    self.order_attention.append(nn.Linear(hidden_dim, 1))
         
         # Dropout层
         self.dropout_layer = nn.Dropout(dropout)
@@ -167,18 +201,66 @@ class SkillPathEncoder(nn.Module):
         edge_index = edge_index.to(device)
         if edge_attr is not None:
             edge_attr = edge_attr.to(device)
-            
+        
+        # 保存原始节点特征用于残差连接
+        original_x = x
+        
         for i, gnn_layer in enumerate(self.gnn_layers):
-            # 对于GAT，需要提供边特征
-            if self.gnn_type == 'gat' and edge_attr is not None:
-                x = gnn_layer(x, edge_index, edge_attr)
+            # 处理边特征（如果有）
+            transformed_edge_attr = None
+            if edge_attr is not None and hasattr(self, 'edge_encoders'):
+                transformed_edge_attr = self.edge_encoders[i](edge_attr)
+                transformed_edge_attr = F.relu(transformed_edge_attr)
+            
+            # 有序消息传递
+            if self.use_ordered_msg_passing and hasattr(self, 'order_attention'):
+                # 计算节点重要性分数
+                node_scores = self.order_attention[i](x).squeeze(-1)
+                
+                # 为每条边计算源节点的重要性权重
+                src_nodes, dst_nodes = edge_index
+                edge_weights = torch.exp(node_scores[src_nodes])
+                
+                # 如果有边特征，将边权重与边特征结合
+                if transformed_edge_attr is not None:
+                    # 扩展边权重维度以匹配边特征维度
+                    edge_weights = edge_weights.unsqueeze(-1).expand_as(transformed_edge_attr)
+                    transformed_edge_attr = transformed_edge_attr * edge_weights
+                
+                # 对于GAT，需要提供边特征
+                if self.gnn_type == 'gat' and transformed_edge_attr is not None:
+                    x_new = gnn_layer(x, edge_index, transformed_edge_attr)
+                else:
+                    # 对于不支持边特征的GNN，我们可以通过修改邻接矩阵来实现加权
+                    if self.gnn_type != 'gat' and edge_weights is not None:
+                        # 创建一个带权重的稀疏邻接矩阵
+                        edge_weights_flat = edge_weights
+                        if edge_weights_flat.dim() > 1:
+                            edge_weights_flat = edge_weights_flat.mean(dim=1)
+                        x_new = gnn_layer(x, edge_index, edge_weights_flat)
+                    else:
+                        x_new = gnn_layer(x, edge_index)
             else:
-                x = gnn_layer(x, edge_index)
+                # 标准GNN前向传播
+                if self.gnn_type == 'gat' and transformed_edge_attr is not None:
+                    x_new = gnn_layer(x, edge_index, transformed_edge_attr)
+                else:
+                    x_new = gnn_layer(x, edge_index)
+            
+            # 应用残差连接（如果维度匹配）
+            if x.size(-1) == x_new.size(-1):
+                x = x_new + x
+            else:
+                x = x_new
             
             # 除了最后一层外，应用ReLU和Dropout
             if i < len(self.gnn_layers) - 1:
                 x = self.activation(x)
                 x = self.dropout_layer(x)
+        
+        # 最终添加全局残差连接（如果维度匹配）
+        if original_x.size(-1) == x.size(-1):
+            x = x + original_x
         
         return x
 
