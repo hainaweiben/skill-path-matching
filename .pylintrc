@@ -1,0 +1,69 @@
+[MASTER]
+# 递归搜索Python模块
+recursive=yes
+
+# 添加要在sys.path中的路径
+init-hook='import sys; sys.path.append(".")'
+
+# 要忽略的文件或目录
+ignore=CVS,.git,__pycache__,build,dist
+
+# 要忽略的警告
+disable=C0111,  # missing-docstring
+        C0103,  # invalid-name
+        C0303,  # trailing-whitespace
+        W0621,  # redefined-outer-name
+        R0903,  # too-few-public-methods
+        R0913,  # too-many-arguments
+        R0914,  # too-many-locals
+        W0702,  # bare-except
+        W0703,  # broad-except
+        W0511   # fixme
+
+[FORMAT]
+# 最大行长度
+max-line-length=120
+
+# 期望的缩进宽度
+indent-after-paren=4
+
+[BASIC]
+# 变量名的正则表达式
+variable-rgx=[a-z_][a-z0-9_]{1,30}$
+
+# 函数名的正则表达式
+function-rgx=[a-z_][a-z0-9_]{1,30}$
+
+# 方法名的正则表达式
+method-rgx=[a-z_][a-z0-9_]{1,30}$
+
+# 属性名的正则表达式
+attr-rgx=[a-z_][a-z0-9_]{1,30}$
+
+# 参数名的正则表达式
+argument-rgx=[a-z_][a-z0-9_]{1,30}$
+
+[SIMILARITIES]
+# 最小相似行数
+min-similarity-lines=6
+
+# 忽略导入语句
+ignore-imports=yes
+
+[TYPECHECK]
+# 要跳过的模块
+ignored-modules=numpy,torch,tensorflow
+
+[MESSAGES CONTROL]
+# 禁用一些不太重要的警告
+disable=C0111,C0103,C0303,W0621,R0903,R0913,R0914,W0702,W0703,W0511
+
+[REPORTS]
+# 设置输出格式
+output-format=text
+
+# 评估得分的阈值
+evaluation=10.0 - ((float(5 * error + warning + refactor + convention) / statement) * 10)
+
+# 显示统计信息
+reports=yes
