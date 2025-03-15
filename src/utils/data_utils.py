@@ -4,14 +4,15 @@
 """
 
 import os
+
+
 import torch
-from typing import Dict
 
 
-def save_model(model: torch.nn.Module, save_path: str, metadata: Dict = None):
+def save_model(model: torch.nn.Module, save_path: str, metadata: dict = None):
     """
     保存模型
-    
+
     Args:
         model: PyTorch模型
         save_path: 保存路径
@@ -19,16 +20,14 @@ def save_model(model: torch.nn.Module, save_path: str, metadata: Dict = None):
     """
     # 创建保存目录（如果不存在）
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
-    
+
     # 准备保存数据
-    save_data = {
-        'model_state_dict': model.state_dict()
-    }
-    
+    save_data = {"model_state_dict": model.state_dict()}
+
     # 添加元数据（如果有）
     if metadata is not None:
-        save_data['metadata'] = metadata
-    
+        save_data["metadata"] = metadata
+
     # 保存模型
     torch.save(save_data, save_path)
     print(f"模型已保存到: {save_path}")
