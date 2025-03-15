@@ -18,10 +18,12 @@ import random
 import numpy as np
 import pandas as pd
 import torch
+import networkx as nx
 from torch.utils.data import Dataset, DataLoader
 from torch_geometric.data import Data
 from sklearn.preprocessing import StandardScaler
 from gensim.models import KeyedVectors
+import community as community_louvain
 
 # 配置日志系统
 logging.basicConfig(
@@ -63,8 +65,22 @@ class SkillMatchingDataset(Dataset):
         self.word2vec = None
         if word2vec_path and os.path.exists(word2vec_path):
             try:
-                self.word2vec = KeyedVectors.load(word2vec_path)
-                self.logger.info(f"成功加载词向量模型：{word2vec_path}")
+                # 检测文件格式并使用相应的加载方法
+                # 通过文件头部判断文件类型
+                with open(word2vec_path, 'rb') as f:
+                    header = f.read(2)
+                    f.seek(0)  # 重置文件指针
+                    
+                    if header.startswith(b'\x80\x04'):  # pickle 协议4标记
+                        self.word2vec = KeyedVectors.load(word2vec_path)
+                        self.logger.info(f"成功加载 pickle 格式词向量模型：{word2vec_path}")
+                    else:  # 假设是原始 word2vec 二进制格式
+                        self.word2vec = KeyedVectors.load_word2vec_format(
+                            word2vec_path,
+                            binary=True,
+                            unicode_errors='ignore'
+                        )
+                        self.logger.info(f"成功加载原始 word2vec 格式模型：{word2vec_path}")
             except Exception as e:
                 self.logger.error(f"加载词向量失败：{str(e)}")
 
@@ -195,22 +211,35 @@ class SkillMatchingDataset(Dataset):
         self.node_idx_to_id = {i: node_id for node_id, i in self.node_id_to_idx.items()}
         num_nodes = len(processed_nodes)
         # 如果使用词向量，维度根据词向量调整，否则默认128维
-        feature_dim = self.word2vec.vector_size if self.word2vec else 128
+        feature_dim = 128
+        if self.word2vec is not None:
+            feature_dim = self.word2vec.vector_size
         node_features = np.zeros((num_nodes, feature_dim), dtype=np.float32)
         
         for i, node in enumerate(processed_nodes):
             # 使用词向量生成节点特征
-            if self.word2vec:
-                name = node.get('name', '')
-                if name in self.word2vec:
-                    node_features[i] = self.word2vec[name]
+            name = node.get('name', '')
+            # 将名称转换为小写并分词，以提高匹配率
+            name_tokens = name.lower().split()
+            if self.word2vec is not None and name_tokens:
+                # 尝试获取所有可用词的词向量平均值
+                valid_vectors = []
+                for token in name_tokens:
+                    try:
+                        if token in self.word2vec:
+                            valid_vectors.append(self.word2vec[token])
+                    except KeyError:
+                        continue
+                if valid_vectors:
+                    node_features[i] = np.mean(valid_vectors, axis=0)
                 else:
-                    # 对未知或缺失词汇，使用随机向量并做特殊标记
+                    # 如果没有任何词向量可用，使用随机向量
                     node_features[i] = np.random.normal(loc=0.5, scale=0.1, size=feature_dim)
                     node_features[i][0] = -1  # 标记未知
             else:
-                # 不使用词向量时，调用基础特征生成方法
-                node_features[i] = self.generate_basic_features(node)
+                # 对未知或缺失词汇，使用随机向量并做特殊标记
+                node_features[i] = np.random.normal(loc=0.5, scale=0.1, size=feature_dim)
+                node_features[i][0] = -1  # 标记未知
         
         if self.normalize:
             self.skill_scaler = StandardScaler()
@@ -265,22 +294,158 @@ class SkillMatchingDataset(Dataset):
                 num_nodes=num_nodes
             )
         self.logger.info(f"技能图构建完成：{num_nodes} 个节点，{edge_index.shape[1]} 条边")
+        
+        # 技能图构建完成
+        self.logger.info("Basic skill graph construction completed successfully")
+        
+        # Convert to NetworkX graph for advanced feature engineering
+        self.logger.info("Converting to NetworkX graph for advanced feature engineering...")
+        nx_graph = nx.Graph()
+        
+        # Add nodes
+        for i, node in enumerate(processed_nodes):
+            nx_graph.add_node(node['id'], **{k: v for k, v in node.items() if k != 'id'})
+        
+        # Add edges
+        for edge_data in self.skill_graph_data.get('edges', []):
+            if isinstance(edge_data, list) and len(edge_data) >= 2:
+                source_id, target_id = edge_data[0], edge_data[1]
+                # Get edge weight if available
+                weight = 1.0
+                if len(edge_data) > 2 and isinstance(edge_data[2], dict) and 'weight' in edge_data[2]:
+                    weight = float(edge_data[2]['weight'])
+                nx_graph.add_edge(source_id, target_id, weight=weight)
+            elif isinstance(edge_data, dict) and 'source' in edge_data and 'target' in edge_data:
+                source_id, target_id = edge_data['source'], edge_data['target']
+                weight = float(edge_data.get('weight', 1.0))
+                nx_graph.add_edge(source_id, target_id, weight=weight)
+        
+        # Generate enhanced node features
+        node_ids = [node['id'] for node in processed_nodes]
+        centrality_features = self.enhance_node_features(nx_graph, node_ids)
+        
+        # Store centrality features in a dictionary for easy access
+        self.node_centrality_features = {}
+        for i, node_id in enumerate(node_ids):
+            self.node_centrality_features[node_id] = centrality_features[i]
+        
+        # Generate community features
+        self.community_features = self.generate_community_features(nx_graph)
+        
+        # Enhance the original node features with centrality and community features
+        enhanced_node_features = torch.zeros((num_nodes, node_features.shape[1] + 9), dtype=torch.float)
+        
+        # Copy original word vector features
+        enhanced_node_features[:, :node_features.shape[1]] = node_features
+        
+        # Add centrality and community features
+        for i, node in enumerate(processed_nodes):
+            node_id = node['id']
+            # Add centrality features
+            if node_id in self.node_centrality_features:
+                enhanced_node_features[i, node_features.shape[1]:node_features.shape[1]+6] = torch.tensor(
+                    self.node_centrality_features[node_id], dtype=torch.float
+                )
+            
+            # Add community features
+            if node_id in self.community_features:
+                comm_features = self.community_features[node_id]
+                # Normalize community ID
+                enhanced_node_features[i, node_features.shape[1]+6] = comm_features['community_id'] / max(1, self.max_community_id)
+                enhanced_node_features[i, node_features.shape[1]+7] = comm_features['community_size'] / len(processed_nodes)
+                enhanced_node_features[i, node_features.shape[1]+8] = comm_features['normalized_size']
+        
+        # Update the graph with enhanced features
+        if hasattr(self.skill_graph, 'edge_attr'):
+            self.skill_graph = Data(
+                x=enhanced_node_features,
+                edge_index=self.skill_graph.edge_index,
+                edge_attr=self.skill_graph.edge_attr,
+                num_nodes=num_nodes
+            )
+        else:
+            self.skill_graph = Data(
+                x=enhanced_node_features,
+                edge_index=self.skill_graph.edge_index,
+                num_nodes=num_nodes
+            )
+            
+        self.logger.info(f"Enhanced node features with centrality and community features. New feature dimension: {enhanced_node_features.shape[1]}")
 
-    def generate_basic_features(self, node):
-        """基础特征生成方法（当不使用词向量时）"""
-        features = np.zeros(128)
-        # 简单的名称哈希特征
-        name_hash = hash(node.get('name', '')) % 100000
-        for j in range(16):
-            features[j] = (name_hash >> j) & 1
-        # 类型 one-hot 编码（假设类别有 technical, business, soft, unknown）
-        type_map = {'technical': 0, 'business': 1, 'soft': 2, 'unknown': 3}
-        features[16:20] = np.eye(4)[type_map.get(node.get('type', 'unknown'), 3)]
-        features[20] = len(node.get('name', '')) / 50  # 名称长度归一化
-        features[21] = node.get('importance', 0) / 5
-        features[22:] = np.random.normal(0, 0.1, 106)
-        return features
-
+    def enhance_node_features(self, graph, node_ids):
+        """
+        Generate enhanced node centrality features from graph structure
+        
+        Args:
+            graph (networkx.Graph): The skill graph
+            node_ids (list): List of node IDs to generate features for
+            
+        Returns:
+            np.ndarray: Array of enhanced node features
+        """
+        # Calculate various centrality metrics
+        self.logger.info("Computing node centrality features...")
+        pagerank = nx.pagerank(graph)
+        betweenness = nx.betweenness_centrality(graph)
+        clustering = nx.clustering(graph)
+        degree_centrality = nx.degree_centrality(graph)
+        closeness_centrality = nx.closeness_centrality(graph)
+        
+        # Get node degrees
+        degrees = dict(graph.degree())
+        max_degree = max(degrees.values()) if degrees else 1
+        
+        enhanced_features = []
+        for node_id in node_ids:
+            node_features = [
+                pagerank.get(node_id, 0),
+                betweenness.get(node_id, 0),
+                clustering.get(node_id, 0),
+                degree_centrality.get(node_id, 0),
+                closeness_centrality.get(node_id, 0),
+                degrees.get(node_id, 0) / max_degree
+            ]
+            enhanced_features.append(node_features)
+        
+        self.logger.info(f"Generated centrality features for {len(node_ids)} nodes")
+        return np.array(enhanced_features)
+        
+    def generate_community_features(self, graph):
+        """
+        Generate community features using Louvain community detection algorithm
+        
+        Args:
+            graph (networkx.Graph): The skill graph
+            
+        Returns:
+            dict: Dictionary mapping node IDs to community features
+        """
+        self.logger.info("Detecting skill communities using Louvain algorithm...")
+        # Apply Louvain community detection
+        communities = community_louvain.best_partition(graph)
+        
+        # Count community sizes
+        community_sizes = {}
+        for community_id in communities.values():
+            community_sizes[community_id] = community_sizes.get(community_id, 0) + 1
+        
+        # Calculate max community size for normalization
+        max_community_size = max(community_sizes.values()) if community_sizes else 1
+        self.max_community_id = max(communities.values()) if communities else 0
+        
+        # Generate community features for each node
+        community_features = {}
+        for node_id, community_id in communities.items():
+            community_size = community_sizes.get(community_id, 0)
+            community_features[node_id] = {
+                'community_id': community_id,
+                'community_size': community_size,
+                'normalized_size': community_size / max_community_size
+            }
+        
+        self.logger.info(f"Detected {len(set(communities.values()))} communities in the skill graph")
+        return community_features
+    
     def get_extended_occupation_features(self, occupation_code):
         """
         生成扩展的职业特征向量，整合以下信息：

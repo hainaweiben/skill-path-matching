@@ -10,7 +10,7 @@ data:
 
 # 模型配置
 model:
-  skill_input_dim: 128
+  skill_input_dim: 137
   occupation_input_dim: 387
   hidden_dim: 64
   embedding_dim: 64
