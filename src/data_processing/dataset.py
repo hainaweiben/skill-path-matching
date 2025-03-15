@@ -18,7 +18,6 @@ import random
 import numpy as np
 import pandas as pd
 import torch
-import networkx as nx
 from torch.utils.data import Dataset, DataLoader
 from torch_geometric.data import Data
 from sklearn.preprocessing import StandardScaler
@@ -186,7 +185,7 @@ class SkillMatchingDataset(Dataset):
                 # 如果已经是字典格式，直接使用
                 processed_nodes.append(node_data)
         
-        # 增加一个"未知技能"节点，确保所有技能都有对应特征
+        # 增加一个“未知技能”节点，确保所有技能都有对应特征
         processed_nodes.append({
             'id': 'UNK', 
             'name': 'Unknown Skill',
@@ -199,13 +198,26 @@ class SkillMatchingDataset(Dataset):
         feature_dim = self.word2vec.vector_size if self.word2vec else 128
         node_features = np.zeros((num_nodes, feature_dim), dtype=np.float32)
         
-        # 创建NetworkX图用于计算图特征
-        self.nx_graph = nx.Graph()
-        
-        # 添加节点
         for i, node in enumerate(processed_nodes):
-            self.nx_graph.add_node(i, **node)
-            
+            # 使用词向量生成节点特征
+            if self.word2vec:
+                name = node.get('name', '')
+                if name in self.word2vec:
+                    node_features[i] = self.word2vec[name]
+                else:
+                    # 对未知或缺失词汇，使用随机向量并做特殊标记
+                    node_features[i] = np.random.normal(loc=0.5, scale=0.1, size=feature_dim)
+                    node_features[i][0] = -1  # 标记未知
+            else:
+                # 不使用词向量时，调用基础特征生成方法
+                node_features[i] = self.generate_basic_features(node)
+        
+        if self.normalize:
+            self.skill_scaler = StandardScaler()
+            node_features = self.skill_scaler.fit_transform(node_features)
+            self.logger.info("完成技能节点特征标准化")
+        
+        node_features = torch.tensor(node_features, dtype=torch.float)
         # 构建边索引
         edge_index = []
         edge_attr = []
@@ -233,47 +245,6 @@ class SkillMatchingDataset(Dataset):
             # 提取边权重作为边属性（如果存在）
             weight = edge_attrs.get('weight', 1.0)
             edge_attr.append([float(weight)])
-            
-            # 添加边到NetworkX图
-            self.nx_graph.add_edge(src, tgt, weight=float(weight))
-            
-        # 预计算图特征
-        self.logger.info("计算图特征...")
-        # 1. 度中心性
-        self.degree_centrality = nx.degree_centrality(self.nx_graph)
-        # 2. 聚类系数
-        self.clustering_coefficients = nx.clustering(self.nx_graph)
-        # 3. PageRank值
-        self.pagerank_values = nx.pagerank(self.nx_graph, alpha=0.85)
-        # 4. 介数中心性 (可能计算较慢，可选)
-        if num_nodes < 1000:  # 对于较小的图才计算
-            self.betweenness_centrality = nx.betweenness_centrality(self.nx_graph, k=min(50, num_nodes))
-        else:
-            self.betweenness_centrality = {node: 0.0 for node in range(num_nodes)}
-        
-        self.logger.info("图特征计算完成")
-        
-        for i, node in enumerate(processed_nodes):
-            # 使用词向量生成节点特征
-            if self.word2vec:
-                name = node.get('name', '')
-                if name in self.word2vec:
-                    node_features[i] = self.word2vec[name]
-                else:
-                    # 对未知或缺失词汇，使用随机向量并做特殊标记
-                    node_features[i] = np.random.normal(loc=0.5, scale=0.1, size=feature_dim)
-                    node_features[i][0] = -1  # 标记未知
-            else:
-                # 不使用词向量时，调用基础特征生成方法
-                node_features[i] = self.generate_basic_features(node, i)
-        
-        if self.normalize:
-            self.skill_scaler = StandardScaler()
-            node_features = self.skill_scaler.fit_transform(node_features)
-            self.logger.info("完成技能节点特征标准化")
-        
-        node_features = torch.tensor(node_features, dtype=torch.float)
-        
         if edge_index:
             edge_index = torch.tensor(edge_index, dtype=torch.long).t().contiguous()
         else:
@@ -295,7 +266,7 @@ class SkillMatchingDataset(Dataset):
             )
         self.logger.info(f"技能图构建完成：{num_nodes} 个节点，{edge_index.shape[1]} 条边")
 
-    def generate_basic_features(self, node, node_idx=None):
+    def generate_basic_features(self, node):
         """基础特征生成方法（当不使用词向量时）"""
         features = np.zeros(128)
         # 简单的名称哈希特征
@@ -307,38 +278,7 @@ class SkillMatchingDataset(Dataset):
         features[16:20] = np.eye(4)[type_map.get(node.get('type', 'unknown'), 3)]
         features[20] = len(node.get('name', '')) / 50  # 名称长度归一化
         features[21] = node.get('importance', 0) / 5
-        
-        # 添加图结构特征
-        if hasattr(self, 'nx_graph') and node_idx is not None:
-            # 22-25: 度中心性 - 表示节点连接的重要性
-            features[22] = self.degree_centrality.get(node_idx, 0.0)
-            # 26-29: 聚类系数 - 表示节点邻居之间的连接程度
-            features[26] = self.clustering_coefficients.get(node_idx, 0.0)
-            # 30-33: PageRank值 - 表示节点在图中的全局重要性
-            features[30] = self.pagerank_values.get(node_idx, 0.0)
-            # 34-37: 介数中心性 - 表示节点作为信息流桥梁的重要性
-            features[34] = self.betweenness_centrality.get(node_idx, 0.0)
-            
-            # 38-41: 节点的邻居数量（归一化）
-            neighbors = list(self.nx_graph.neighbors(node_idx))
-            features[38] = len(neighbors) / max(1, self.nx_graph.number_of_nodes())
-            
-            # 42-45: 邻居的平均PageRank（如果有邻居）
-            if neighbors:
-                avg_neighbor_pagerank = sum(self.pagerank_values.get(n, 0.0) for n in neighbors) / len(neighbors)
-                features[42] = avg_neighbor_pagerank
-            
-            # 46-49: 邻居的技能类型分布
-            if neighbors:
-                neighbor_types = [self.nx_graph.nodes[n].get('type', 'unknown') for n in neighbors]
-                type_counts = {t: neighbor_types.count(t) / len(neighbors) for t in type_map.keys()}
-                for i, t in enumerate(type_map.keys()):
-                    features[46 + i] = type_counts.get(t, 0.0)
-        
-        # 填充剩余特征位置
-        remaining_features = 128 - 50  # 前50个位置已经使用
-        features[50:] = np.random.normal(0, 0.01, remaining_features)  # 减小随机噪声的方差
-        
+        features[22:] = np.random.normal(0, 0.1, 106)
         return features
 
     def get_extended_occupation_features(self, occupation_code):
