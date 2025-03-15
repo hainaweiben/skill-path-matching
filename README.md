@@ -61,7 +61,7 @@ skill_path_matching/
 ## 环境配置与安装
 
 ### 系统要求
-- Python 3.7+
+- Python 3.12
 - CUDA 10.2+ (用于GPU加速，可选)
 - 8GB+ RAM
 
