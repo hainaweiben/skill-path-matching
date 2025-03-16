@@ -64,13 +64,8 @@ class FocalLoss(nn.Module):
         # Calculate focal loss
         focal_loss = alpha_weight * focal_weight * bce_loss
 
-        # Apply reduction
-        if self.reduction == "mean":
-            return focal_loss.mean()
-        elif self.reduction == "sum":
-            return focal_loss.sum()
-        else:  # 'none'
-            return focal_loss
+        # 始终返回标量损失
+        return focal_loss.mean()
 
 class SkillPathEncoder(nn.Module):
     """
@@ -293,16 +288,12 @@ class SkillPathEncoder(nn.Module):
                 else:
                     x_new = gnn_layer(x, edge_index)
 
-            # 应用残差连接（如果维度匹配）
-            if x.size(-1) == x_new.size(-1):
-                x = x_new + x
-            else:
-                x = x_new
-
-            # 除了最后一层外，应用ReLU和Dropout
-            if i < len(self.gnn_layers) - 1:
-                x = self.activation(x)
-                x = self.dropout_layer(x)
+            # 新增残差连接（从第二层开始）
+            if i > 0:
+                x_new = x_new + x  # 残差相加
+            
+            x = self.activation(x_new)
+            x = self.dropout_layer(x)
 
         # 最终添加全局残差连接（如果维度匹配）
         if original_x.size(-1) == x.size(-1):
@@ -514,6 +505,33 @@ class SkillMatchingModel(nn.Module):
 
         # 使用Focal Loss替代BCE Loss
         self.loss_fn = FocalLoss(alpha=focal_alpha, gamma=focal_gamma)
+        
+        # 多任务学习的预测头
+        self.importance_head = nn.Sequential(
+            nn.Linear(embedding_dim * 2, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, 1),
+            nn.Sigmoid()
+        )
+        
+        self.level_head = nn.Sequential(
+            nn.Linear(embedding_dim * 2, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, 5),  # 假设level分为5级
+            nn.Softmax(dim=1)
+        )
+        
+        # 辅助任务的损失函数
+        self.mse_loss = nn.MSELoss()
+        self.ce_loss = nn.CrossEntropyLoss()
+        
+        # 多任务损失权重
+        self.importance_weight = 0.5
+        self.level_weight = 0.3
 
     def forward(self, occupation_features, skill_idx, skill_paths=None, path_lengths=None, match=None, importance=None, level=None):
         """
@@ -575,44 +593,43 @@ class SkillMatchingModel(nn.Module):
 
         # 连接职业嵌入和技能嵌入
         combined_features = torch.cat([occupation_embeddings, enhanced_skill_features], dim=1)
-
-        # 预测匹配概率
-        match_prob = self.matching_predictor(combined_features).squeeze(-1)
-
-        # 如果提供了匹配标签，计算损失
-        loss = None
+        
+        # 主任务：匹配预测
+        match_logits = self.matching_predictor(combined_features)
+        
+        # 辅助任务：importance和level预测
+        importance_pred = self.importance_head(combined_features)
+        level_pred = self.level_head(combined_features)
+        
+        # 主输出：匹配概率
+        match_prob = match_logits.squeeze(-1)
+        
+        # 计算主任务损失
+        total_loss = None
         if match is not None:
-            # 基本匹配损失
-            base_loss = self.loss_fn(match_prob, match)
-
-            # 路径相关损失
-            path_loss = 0.0
-            if skill_paths is not None and path_lengths is not None:
-                batch_size = skill_paths.size(0)
-                # 计算相邻技能在路径中的连续性损失
-                for i in range(batch_size):
-                    path_length = path_lengths[i]
-                    path = skill_paths[i, :path_length]
-                    
-                    # 计算相邻技能嵌入的相似度
-                    for j in range(path_length - 1):
-                        curr_emb = skill_embeddings[path[j]]
-                        next_emb = skill_embeddings[path[j + 1]]
-                        sim = F.cosine_similarity(curr_emb.unsqueeze(0), next_emb.unsqueeze(0))
-                        path_loss += 1.0 - sim
-
-                path_loss = path_loss / batch_size if batch_size > 0 else 0.0
-
-            # 组合损失
-            loss = base_loss + 0.1 * path_loss
-
-            # 如果提供了重要性和水平，进行加权
-            if importance is not None and level is not None:
-                weights = importance * level
-                loss = loss * weights
-                loss = loss.mean()
-
-        return match_prob, loss
+            # 计算主任务损失 - 确保是标量
+            match_loss = self.loss_fn(match_prob, match)
+            
+            # 计算辅助任务损失
+            if importance is not None:
+                importance_loss = self.mse_loss(importance_pred.squeeze(), importance)
+            else:
+                importance_loss = torch.tensor(0.0, device=match_prob.device)
+            
+            # 确保 level 标签在有效范围内 [0, 4]
+            if level is not None:
+                level = torch.clamp(level, 0, 4).long()
+                level_loss = self.ce_loss(level_pred, level)
+            else:
+                level_loss = torch.tensor(0.0, device=match_prob.device)
+            
+            # 组合损失 - 确保是标量
+            total_loss = match_loss
+            if self.training:  # 只在训练时添加辅助任务损失
+                total_loss += self.importance_weight * importance_loss + self.level_weight * level_loss
+        
+        # 返回格式与trainer的_forward方法保持一致：(outputs, loss)
+        return match_prob, total_loss
 
 def get_device(device_str=None):
     """
