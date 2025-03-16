@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.data import Data
-from torch_geometric.nn import GATConv
+from torch_geometric.nn import GATv2Conv
 
 
 class FocalLoss(nn.Module):
@@ -83,7 +83,7 @@ class SkillPathEncoder(nn.Module):
 
     def _get_gnn_layer(self):
         """获取GAT层的参数"""
-        return GATConv, {"heads": self.heads}
+        return GATv2Conv, {}
 
     def _create_edge_encoders(self, hidden_dim):
         """创建边特征编码器"""
@@ -95,19 +95,37 @@ class SkillPathEncoder(nn.Module):
     def _create_first_layer(self, GNNLayer, hidden_dim, gnn_kwargs):
         """创建第一个GAT层"""
         if self.edge_dim is not None:
-            return GNNLayer(self.input_dim, hidden_dim, edge_dim=hidden_dim, **gnn_kwargs)
-        return GNNLayer(self.input_dim, hidden_dim, **gnn_kwargs)
+            return GNNLayer(
+                self.input_dim,
+                hidden_dim,
+                heads=self.heads,  # 保留单一处传递
+                edge_dim=self.edge_dim,
+                add_self_loops=False,
+                **gnn_kwargs
+            )
+        return GNNLayer(self.input_dim, hidden_dim, heads=self.heads, **gnn_kwargs)
 
     def _create_middle_layer(self, GNNLayer, hidden_dim, gnn_kwargs):
         """创建中间GAT层"""
         if self.edge_dim is not None:
-            return GNNLayer(hidden_dim * self.heads, hidden_dim, edge_dim=hidden_dim, **gnn_kwargs)
-        return GNNLayer(hidden_dim * self.heads, hidden_dim, **gnn_kwargs)
+            return GNNLayer(
+                hidden_dim * self.heads,
+                hidden_dim,
+                heads=self.heads,
+                edge_dim=self.edge_dim,
+                **gnn_kwargs
+            )
+        return GNNLayer(hidden_dim * self.heads, hidden_dim, heads=self.heads, **gnn_kwargs)
 
     def _create_final_layer(self, GNNLayer, hidden_dim):
         """创建最后一个GAT层"""
         if self.edge_dim is not None:
-            return GNNLayer(hidden_dim * self.heads, self.output_dim, edge_dim=hidden_dim, heads=1)
+            return GNNLayer(
+                hidden_dim * self.heads,
+                self.output_dim,
+                heads=1,
+                edge_dim=self.edge_dim
+            )
         return GNNLayer(hidden_dim * self.heads, self.output_dim, heads=1)
 
     def _create_order_attention(self, hidden_dim):
@@ -156,8 +174,8 @@ class SkillPathEncoder(nn.Module):
         self.output_dim = output_dim
         self.num_layers = num_layers
         self.dropout = dropout
-        self.gnn_type = "gat"  # 固定使用GAT
-        self.heads = heads
+        self.gnn_type = "gatv2"  # 固定使用GATv2
+        self.heads = heads  # 确保heads参数正确初始化
         self.edge_dim = edge_dim
         self.use_ordered_msg_passing = use_ordered_msg_passing
         self.path_max_length = path_max_length
@@ -256,11 +274,11 @@ class SkillPathEncoder(nn.Module):
                     transformed_edge_attr = transformed_edge_attr * edge_weights
 
                 # 对于GAT，需要提供边特征
-                if self.gnn_type == "gat" and transformed_edge_attr is not None:
-                    x_new = gnn_layer(x, edge_index, transformed_edge_attr)
+                if self.gnn_type == "gatv2" and transformed_edge_attr is not None:
+                    x_new = gnn_layer(x, edge_index, edge_attr=transformed_edge_attr)
                 else:
                     # 对于不支持边特征的GNN，我们可以通过修改邻接矩阵来实现加权
-                    if self.gnn_type != "gat" and edge_weights is not None:
+                    if self.gnn_type != "gatv2" and edge_weights is not None:
                         # 创建一个带权重的稀疏邻接矩阵
                         edge_weights_flat = edge_weights
                         if edge_weights_flat.dim() > 1:
@@ -270,8 +288,8 @@ class SkillPathEncoder(nn.Module):
                         x_new = gnn_layer(x, edge_index)
             else:
                 # 标准GNN前向传播
-                if self.gnn_type == "gat" and transformed_edge_attr is not None:
-                    x_new = gnn_layer(x, edge_index, transformed_edge_attr)
+                if self.gnn_type == "gatv2" and transformed_edge_attr is not None:
+                    x_new = gnn_layer(x, edge_index, edge_attr=transformed_edge_attr)
                 else:
                     x_new = gnn_layer(x, edge_index)
 
