@@ -559,7 +559,8 @@ class SkillMatchingDataset(Dataset):
             if not tech_info.empty:
                 tech_count = len(tech_info)
                 try:
-                    avg_hot = tech_info["is_hot"].astype(float).mean()
+                    # Convert 'Y'/'N' to 1.0/0.0 before calculating mean
+                    avg_hot = tech_info["is_hot"].map({"Y": 1.0, "N": 0.0}).mean()
                 except (ValueError, TypeError, KeyError) as e:
                     # 当 is_hot 列不存在或数据类型无法转换时触发
                     self.logger.warning(f"计算技能热度平均值时出错: {e}, 使用默认值 0.0")
