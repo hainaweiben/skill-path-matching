@@ -324,27 +324,30 @@ class SkillMatchingDataset(Dataset):
         self.logger.info(f"技能图构建完成：{num_nodes} 个节点，{len(edge_index)} 条边")
         self.logger.info("Basic skill graph construction completed successfully")
 
-        # Convert to NetworkX graph for advanced feature engineering
-        self.logger.info("Converting to NetworkX graph for advanced feature engineering...")
-        nx_graph = nx.Graph()
+        # 构建NetworkX有向图用于路径生成
+        self.logger.info("构建NetworkX有向图用于路径生成...")
+        self.skill_graph_nx = nx.DiGraph()
 
-        # Add nodes
+        # 添加节点
         for i, node in enumerate(processed_nodes):
-            nx_graph.add_node(node["id"], **{k: v for k, v in node.items() if k != "id"})
+            self.skill_graph_nx.add_node(node["id"], **{k: v for k, v in node.items() if k != "id"})
 
-        # Add edges
+        # 添加有向边
         for edge_data in self.skill_graph_data.get("edges", []):
             if isinstance(edge_data, list) and len(edge_data) >= 2:
                 source_id, target_id = edge_data[0], edge_data[1]
-                # Get edge weight if available
+                # 获取边权重
                 weight = 1.0
                 if len(edge_data) > 2 and isinstance(edge_data[2], dict) and "weight" in edge_data[2]:
                     weight = float(edge_data[2]["weight"])
-                nx_graph.add_edge(source_id, target_id, weight=weight)
+                self.skill_graph_nx.add_edge(source_id, target_id, weight=weight)
             elif isinstance(edge_data, dict) and "source" in edge_data and "target" in edge_data:
                 source_id, target_id = edge_data["source"], edge_data["target"]
                 weight = float(edge_data.get("weight", 1.0))
-                nx_graph.add_edge(source_id, target_id, weight=weight)
+                self.skill_graph_nx.add_edge(source_id, target_id, weight=weight)
+
+        # 构建无向图用于特征工程
+        nx_graph = self.skill_graph_nx.to_undirected()
 
         # Generate enhanced node features
         node_ids = [node["id"] for node in processed_nodes]
@@ -581,6 +584,58 @@ class SkillMatchingDataset(Dataset):
     def __len__(self):
         return len(self.data)
 
+    def generate_skill_path(self, skill_id, max_length=10):
+        """生成技能路径
+
+        参数:
+            skill_id (str): 目标技能ID
+            max_length (int): 最大路径长度
+
+        返回:
+            list: 技能路径（技能索引列表）
+            int: 实际路径长度
+        """
+        # 如果技能不在图中，返回只包含该技能的路径
+        if skill_id not in self.node_id_to_idx:
+            return [self.node_id_to_idx["UNK"]], 1
+
+        # 获取技能在图中的索引
+        skill_idx = self.node_id_to_idx[skill_id]
+
+        # 使用NetworkX有向图
+        G = self.skill_graph_nx
+
+        # 找到所有前置技能（入边）
+        predecessors = list(G.predecessors(skill_id))
+        path = []
+
+        # 如果有前置技能，构建路径
+        if predecessors:
+            # 按照边权重排序前置技能
+            predecessors = sorted(
+                predecessors,
+                key=lambda x: G[x][skill_id].get("weight", 0),
+                reverse=True
+            )
+
+            # 构建路径，从前置技能到目标技能
+            current_length = 0
+            for pred in predecessors:
+                if current_length >= max_length - 1:
+                    break
+                path.append(self.node_id_to_idx[pred])
+                current_length += 1
+
+        # 添加目标技能到路径末尾
+        path.append(skill_idx)
+        path_length = len(path)
+
+        # 填充到最大长度
+        while len(path) < max_length:
+            path.append(self.node_id_to_idx["UNK"])
+
+        return path, path_length
+
     def __getitem__(self, idx):
         """返回扩展后的样本数据"""
         row = self.data.iloc[idx]
@@ -589,6 +644,10 @@ class SkillMatchingDataset(Dataset):
         # 技能节点特征：使用技能图中预构建的映射
         skill_id = row["skill_id"]
         skill_idx = self.node_id_to_idx.get(skill_id, self.node_id_to_idx.get("UNK"))
+        
+        # 生成技能路径
+        skill_path, path_length = self.generate_skill_path(skill_id)
+        
         # 标签及其他数值特征
         match = torch.tensor(row["match"], dtype=torch.float)
         importance = torch.tensor(row["importance"], dtype=torch.float)
@@ -599,7 +658,11 @@ class SkillMatchingDataset(Dataset):
             occ_feat, skill_idx, match, importance, level = self.transform(
                 occ_feat, skill_idx, match, importance, level
             )
-        return (occ_feat, torch.tensor(skill_idx, dtype=torch.long), match, importance, level)
+
+        # 转换为张量
+        skill_path = torch.tensor(skill_path, dtype=torch.long)
+        path_length = torch.tensor(path_length, dtype=torch.long)
+        return occ_feat, torch.tensor(skill_idx, dtype=torch.long), skill_path, path_length, match, importance, level
 
 
 class NoiseAugmentation:

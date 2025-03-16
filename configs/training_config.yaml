@@ -17,7 +17,6 @@ model:
   num_gnn_layers: 2
   num_mlp_layers: 2
   dropout: 0.2
-  gnn_type: 'gat'
   focal_alpha: 0.25
   focal_gamma: 2.0
 

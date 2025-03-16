@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.data import Data
-from torch_geometric.nn import GATConv, GCNConv, SAGEConv
+from torch_geometric.nn import GATConv
 
 
 class FocalLoss(nn.Module):
@@ -72,25 +72,18 @@ class FocalLoss(nn.Module):
         else:  # 'none'
             return focal_loss
 
-
 class SkillPathEncoder(nn.Module):
     """
     技能路径编码器
 
     使用图神经网络对技能图进行编码，学习技能之间的关系。
-    增强版本支持有序消息传递和边特征处理。
+    支持有序消息传递、边特征处理和路径建模。
+    支持技能路径的顺序性和依赖关系建模。
     """
 
     def _get_gnn_layer(self):
-        """根据GNN类型返回相应的GNN层类和参数"""
-        if self.gnn_type == "gcn":
-            return GCNConv, {}
-        elif self.gnn_type == "sage":
-            return SAGEConv, {}
-        elif self.gnn_type == "gat":
-            return GATConv, {"heads": self.heads}
-        else:
-            raise ValueError(f"不支持的GNN类型: {self.gnn_type}")
+        """获取GAT层的参数"""
+        return GATConv, {"heads": self.heads}
 
     def _create_edge_encoders(self, hidden_dim):
         """创建边特征编码器"""
@@ -100,28 +93,22 @@ class SkillPathEncoder(nn.Module):
                 self.edge_encoders.append(nn.Linear(self.edge_dim, hidden_dim))
 
     def _create_first_layer(self, GNNLayer, hidden_dim, gnn_kwargs):
-        """创建第一个GNN层"""
-        if self.gnn_type == "gat":
-            if self.edge_dim is not None:
-                return GNNLayer(self.input_dim, hidden_dim, edge_dim=hidden_dim, **gnn_kwargs)
-            return GNNLayer(self.input_dim, hidden_dim, **gnn_kwargs)
-        return GNNLayer(self.input_dim, hidden_dim)
+        """创建第一个GAT层"""
+        if self.edge_dim is not None:
+            return GNNLayer(self.input_dim, hidden_dim, edge_dim=hidden_dim, **gnn_kwargs)
+        return GNNLayer(self.input_dim, hidden_dim, **gnn_kwargs)
 
     def _create_middle_layer(self, GNNLayer, hidden_dim, gnn_kwargs):
-        """创建中间GNN层"""
-        if self.gnn_type == "gat":
-            if self.edge_dim is not None:
-                return GNNLayer(hidden_dim * self.heads, hidden_dim, edge_dim=hidden_dim, **gnn_kwargs)
-            return GNNLayer(hidden_dim * self.heads, hidden_dim, **gnn_kwargs)
-        return GNNLayer(hidden_dim, hidden_dim)
+        """创建中间GAT层"""
+        if self.edge_dim is not None:
+            return GNNLayer(hidden_dim * self.heads, hidden_dim, edge_dim=hidden_dim, **gnn_kwargs)
+        return GNNLayer(hidden_dim * self.heads, hidden_dim, **gnn_kwargs)
 
     def _create_final_layer(self, GNNLayer, hidden_dim):
-        """创建最后一个GNN层"""
-        if self.gnn_type == "gat":
-            if self.edge_dim is not None:
-                return GNNLayer(hidden_dim * self.heads, self.output_dim, edge_dim=hidden_dim, heads=1)
-            return GNNLayer(hidden_dim * self.heads, self.output_dim, heads=1)
-        return GNNLayer(hidden_dim, self.output_dim)
+        """创建最后一个GAT层"""
+        if self.edge_dim is not None:
+            return GNNLayer(hidden_dim * self.heads, self.output_dim, edge_dim=hidden_dim, heads=1)
+        return GNNLayer(hidden_dim * self.heads, self.output_dim, heads=1)
 
     def _create_order_attention(self, hidden_dim):
         """创建有序消息传递的注意力层"""
@@ -142,10 +129,11 @@ class SkillPathEncoder(nn.Module):
         output_dim,
         num_layers=2,
         dropout=0.1,
-        gnn_type="gcn",
         heads=4,
         edge_dim=None,
         use_ordered_msg_passing=True,
+        path_max_length=10,
+        use_path_encoding=True,
     ):
         """
         初始化技能路径编码器
@@ -156,7 +144,6 @@ class SkillPathEncoder(nn.Module):
             output_dim (int): 输出特征维度
             num_layers (int): GNN层数
             dropout (float): Dropout概率
-            gnn_type (str): GNN类型，可选 'gcn', 'sage', 'gat'
             heads (int): GAT的注意力头数
             edge_dim (int, optional): 边特征维度，如果为None则不使用边特征
             use_ordered_msg_passing (bool): 是否使用有序消息传递
@@ -169,16 +156,34 @@ class SkillPathEncoder(nn.Module):
         self.output_dim = output_dim
         self.num_layers = num_layers
         self.dropout = dropout
-        self.gnn_type = gnn_type
+        self.gnn_type = "gat"  # 固定使用GAT
         self.heads = heads
         self.edge_dim = edge_dim
         self.use_ordered_msg_passing = use_ordered_msg_passing
+        self.path_max_length = path_max_length
+        self.use_path_encoding = use_path_encoding
+
+        # 路径编码层
+        if use_path_encoding:
+            self.path_embedding = nn.Embedding(path_max_length, hidden_dim)
+            self.path_position_encoder = nn.Sequential(
+                nn.Linear(hidden_dim * 2, hidden_dim),
+                nn.LayerNorm(hidden_dim),
+                nn.ReLU(),
+                nn.Dropout(dropout)
+            )
+            self.path_lstm = nn.LSTM(
+                input_size=hidden_dim,
+                hidden_size=hidden_dim,
+                num_layers=1,
+                batch_first=True,
+                bidirectional=True
+            )
 
         # 获取GNN层类型和参数
         GNNLayer, self.gnn_kwargs = self._get_gnn_layer()
 
-        # 调整隐藏维度（用于GAT）
-        if gnn_type == "gat" and num_layers > 1:
+        if num_layers > 1:
             hidden_dim = hidden_dim // heads
 
         # 创建边特征编码器
@@ -205,7 +210,7 @@ class SkillPathEncoder(nn.Module):
         self.dropout_layer = nn.Dropout(dropout)
         self.activation = nn.ReLU()
 
-    def forward(self, x, edge_index, edge_attr=None):
+    def forward(self, x, edge_index, edge_attr=None, skill_paths=None, path_lengths=None):
         """
         前向传播
 
@@ -213,6 +218,8 @@ class SkillPathEncoder(nn.Module):
             x (torch.Tensor): 节点特征矩阵
             edge_index (torch.Tensor): 边索引
             edge_attr (torch.Tensor, optional): 边特征
+            skill_paths (torch.Tensor, optional): 技能路径序列，形状为[batch_size, max_path_length]
+            path_lengths (torch.Tensor, optional): 每个路径的实际长度，形状为[batch_size]
 
         返回:
             torch.Tensor: 节点嵌入
@@ -282,6 +289,49 @@ class SkillPathEncoder(nn.Module):
         # 最终添加全局残差连接（如果维度匹配）
         if original_x.size(-1) == x.size(-1):
             x = x + original_x
+
+        # 如果提供了路径信息，进行路径编码
+        if self.use_path_encoding and skill_paths is not None and path_lengths is not None:
+            batch_size = skill_paths.size(0)
+            max_path_length = skill_paths.size(1)
+
+            # 获取路径中每个技能的嵌入
+            path_skill_embeddings = x[skill_paths]  # [batch_size, max_path_length, hidden_dim]
+
+            # 生成位置编码
+            positions = torch.arange(max_path_length, device=x.device).expand(batch_size, -1)
+            position_embeddings = self.path_embedding(positions)  # [batch_size, max_path_length, hidden_dim]
+
+            # 组合技能嵌入和位置编码
+            combined_embeddings = torch.cat([path_skill_embeddings, position_embeddings], dim=-1)
+            path_embeddings = self.path_position_encoder(combined_embeddings)
+
+            # 创建路径掩码
+            mask = torch.arange(max_path_length, device=x.device).expand(batch_size, -1) < path_lengths.unsqueeze(1)
+            mask = mask.float().unsqueeze(-1)  # [batch_size, max_path_length, 1]
+
+            # 应用掩码
+            path_embeddings = path_embeddings * mask
+
+            # 使用LSTM处理路径序列
+            packed_paths = nn.utils.rnn.pack_padded_sequence(
+                path_embeddings,
+                path_lengths.cpu(),
+                batch_first=True,
+                enforce_sorted=False
+            )
+            lstm_out, _ = self.path_lstm(packed_paths)
+            path_encoded, _ = nn.utils.rnn.pad_packed_sequence(lstm_out, batch_first=True)
+
+            # 聚合路径编码（取最后一个有效时间步的状态）
+            path_indices = (path_lengths - 1).view(-1, 1, 1).expand(-1, 1, path_encoded.size(-1))
+            final_path_encoding = torch.gather(path_encoded, 1, path_indices).squeeze(1)
+            
+            # 由于是双向LSTM，需要将输出维度调整为原始维度
+            final_path_encoding = final_path_encoding.view(batch_size, 2, -1).mean(dim=1)
+
+            # 更新节点嵌入
+            x = x + final_path_encoding.mean(dim=0, keepdim=True).expand_as(x)
 
         return x
 
@@ -363,9 +413,10 @@ class SkillMatchingModel(nn.Module):
         num_gnn_layers=2,
         num_mlp_layers=2,
         dropout=0.1,
-        gnn_type="gat",
         focal_alpha=0.25,
         focal_gamma=2.0,
+        path_max_length=10,
+        use_path_encoding=True,
     ):
         """
         初始化技能匹配模型
@@ -378,14 +429,13 @@ class SkillMatchingModel(nn.Module):
             num_gnn_layers (int): GNN层数
             num_mlp_layers (int): MLP层数
             dropout (float): Dropout概率
-            gnn_type (str): GNN类型，可选 'gcn', 'sage', 'gat'
             focal_alpha (float): Focal Loss的alpha参数
             focal_gamma (float): Focal Loss的gamma参数
         """
         super().__init__()
 
         # 确保embedding_dim是4的倍数，以便于GAT的多头注意力
-        if gnn_type == "gat" and embedding_dim % 4 != 0:
+        if embedding_dim % 4 != 0:
             embedding_dim = (embedding_dim // 4 + 1) * 4
             print(f"调整embedding_dim为{embedding_dim}以适应GAT的4个注意力头")
 
@@ -396,8 +446,9 @@ class SkillMatchingModel(nn.Module):
             output_dim=embedding_dim,
             num_layers=num_gnn_layers,
             dropout=dropout,
-            gnn_type=gnn_type,
-            heads=4 if gnn_type == "gat" else 1,
+            heads=4,
+            path_max_length=path_max_length,
+            use_path_encoding=use_path_encoding,
         )
 
         # 职业编码器
@@ -446,13 +497,15 @@ class SkillMatchingModel(nn.Module):
         # 使用Focal Loss替代BCE Loss
         self.loss_fn = FocalLoss(alpha=focal_alpha, gamma=focal_gamma)
 
-    def forward(self, occupation_features, skill_idx, match=None, importance=None, level=None):
+    def forward(self, occupation_features, skill_idx, skill_paths=None, path_lengths=None, match=None, importance=None, level=None):
         """
         前向传播
 
         参数:
             occupation_features (torch.Tensor): 职业特征，形状为 [batch_size, occupation_feature_dim]
             skill_idx (torch.Tensor): 技能索引，形状为 [batch_size]
+            skill_paths (torch.Tensor, optional): 技能路径序列，形状为 [batch_size, max_path_length]
+            path_lengths (torch.Tensor, optional): 每个路径的实际长度，形状为 [batch_size]
             match (torch.Tensor, optional): 匹配标签，形状为 [batch_size]
             importance (torch.Tensor, optional): 重要性，形状为 [batch_size]
             level (torch.Tensor, optional): 水平，形状为 [batch_size]
@@ -468,8 +521,15 @@ class SkillMatchingModel(nn.Module):
         x = self.skill_graph.x.to(device)
         edge_index = self.skill_graph.edge_index.to(device)
 
-        # 使用技能路径编码器编码技能图
-        skill_embeddings = self.skill_encoder(x, edge_index)
+        # 使用技能路径编码器编码技能图，包含路径信息
+        if skill_paths is not None and path_lengths is not None:
+            skill_embeddings = self.skill_encoder(
+                x, edge_index,
+                skill_paths=skill_paths,
+                path_lengths=path_lengths
+            )
+        else:
+            skill_embeddings = self.skill_encoder(x, edge_index)
 
         # 获取批次中每个技能的嵌入
         batch_skill_embeddings = skill_embeddings[skill_idx]
@@ -504,185 +564,37 @@ class SkillMatchingModel(nn.Module):
         # 如果提供了匹配标签，计算损失
         loss = None
         if match is not None:
-            loss = self.loss_fn(match_prob, match)
+            # 基本匹配损失
+            base_loss = self.loss_fn(match_prob, match)
 
-            # 如果提供了重要性和水平，可以在这里使用它们进行加权
+            # 路径相关损失
+            path_loss = 0.0
+            if skill_paths is not None and path_lengths is not None:
+                batch_size = skill_paths.size(0)
+                # 计算相邻技能在路径中的连续性损失
+                for i in range(batch_size):
+                    path_length = path_lengths[i]
+                    path = skill_paths[i, :path_length]
+                    
+                    # 计算相邻技能嵌入的相似度
+                    for j in range(path_length - 1):
+                        curr_emb = skill_embeddings[path[j]]
+                        next_emb = skill_embeddings[path[j + 1]]
+                        sim = F.cosine_similarity(curr_emb.unsqueeze(0), next_emb.unsqueeze(0))
+                        path_loss += 1.0 - sim
+
+                path_loss = path_loss / batch_size if batch_size > 0 else 0.0
+
+            # 组合损失
+            loss = base_loss + 0.1 * path_loss
+
+            # 如果提供了重要性和水平，进行加权
             if importance is not None and level is not None:
-                # 根据重要性和水平调整损失权重
                 weights = importance * level
                 loss = loss * weights
                 loss = loss.mean()
 
         return match_prob, loss
-
-
-class SkillPathMatchingModel(nn.Module):
-    """
-    技能路径匹配模型
-
-    扩展基本的技能匹配模型，考虑技能路径和顺序。
-    """
-
-    def __init__(
-        self,
-        skill_input_dim,
-        occupation_input_dim,
-        hidden_dim=128,
-        embedding_dim=64,
-        num_gnn_layers=2,
-        num_mlp_layers=2,
-        dropout=0.1,
-        gnn_type="gat",
-        focal_alpha=0.25,
-        focal_gamma=2.0,
-    ):
-        """
-        初始化技能路径匹配模型
-
-        参数:
-            skill_input_dim (int): 技能特征维度
-            occupation_input_dim (int): 职业特征维度
-            hidden_dim (int): 隐藏层维度
-            embedding_dim (int): 嵌入维度
-            num_gnn_layers (int): GNN层数
-            num_mlp_layers (int): MLP层数
-            dropout (float): Dropout概率
-            gnn_type (str): GNN类型，可选 'gcn', 'sage', 'gat'
-            focal_alpha (float): Focal Loss的alpha参数
-            focal_gamma (float): Focal Loss的gamma参数
-        """
-        super().__init__()
-
-        # 确保embedding_dim是4的倍数，以便于GAT的多头注意力
-        if gnn_type == "gat" and embedding_dim % 4 != 0:
-            embedding_dim = (embedding_dim // 4 + 1) * 4
-            print(f"调整embedding_dim为{embedding_dim}以适应GAT的4个注意力头")
-
-        # 基本技能匹配模型
-        self.base_model = SkillMatchingModel(
-            skill_input_dim=skill_input_dim,
-            occupation_input_dim=occupation_input_dim,
-            hidden_dim=hidden_dim,
-            embedding_dim=embedding_dim,
-            num_gnn_layers=num_gnn_layers,
-            num_mlp_layers=num_mlp_layers,
-            dropout=dropout,
-            gnn_type=gnn_type,
-            focal_alpha=focal_alpha,
-            focal_gamma=focal_gamma,
-        )
-
-        # 路径注意力层，用于关注技能路径中的重要技能
-        self.path_attention = nn.MultiheadAttention(embed_dim=embedding_dim, num_heads=4, dropout=dropout)
-
-        # 路径聚合层
-        self.path_aggregation = nn.Sequential(
-            nn.Linear(embedding_dim, hidden_dim), nn.ReLU(), nn.Dropout(dropout), nn.Linear(hidden_dim, embedding_dim)
-        )
-
-        # 最终预测层
-        self.final_predictor = nn.Sequential(
-            nn.Linear(embedding_dim * 2, hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, 1),
-            nn.Sigmoid(),
-        )
-
-        # 使用Focal Loss
-        self.loss_fn = FocalLoss(alpha=focal_alpha, gamma=focal_gamma)
-
-    def forward(self, skill_graph, occupation_features, skill_paths):
-        """
-        前向传播
-
-        参数:
-            skill_graph (Data): 技能图
-            occupation_features (torch.Tensor): 职业特征
-            skill_paths (list of list): 技能路径，每个路径是一个技能ID列表
-
-        返回:
-            torch.Tensor: 匹配概率
-        """
-        # 确保数据在正确的设备上
-        device = occupation_features.device
-        skill_graph.x = skill_graph.x.to(device)
-        skill_graph.edge_index = skill_graph.edge_index.to(device)
-        if hasattr(skill_graph, "edge_attr"):
-            skill_graph.edge_attr = skill_graph.edge_attr.to(device)
-
-        # 获取基本技能嵌入
-        skill_embeddings = self.base_model.skill_encoder(
-            skill_graph.x, skill_graph.edge_index, skill_graph.edge_attr if hasattr(skill_graph, "edge_attr") else None
-        )
-
-        # 获取职业嵌入
-        occupation_embedding = self.base_model.occupation_encoder(occupation_features)
-
-        # 处理每个技能路径
-        path_embeddings = []
-        for path in skill_paths:
-            # 获取路径中的技能嵌入
-            path_skill_embeddings = skill_embeddings[path]
-
-            # 应用注意力机制
-            attn_output, _ = self.path_attention(
-                path_skill_embeddings.unsqueeze(1),
-                path_skill_embeddings.unsqueeze(1),
-                path_skill_embeddings.unsqueeze(1),
-            )
-
-            # 聚合路径嵌入
-            path_embedding = self.path_aggregation(attn_output.squeeze(1))
-
-            # 取平均作为最终路径嵌入
-            path_embedding = path_embedding.mean(dim=0)
-
-            path_embeddings.append(path_embedding)
-
-        # 将所有路径嵌入堆叠
-        path_embeddings = torch.stack(path_embeddings)
-
-        # 将职业嵌入与路径嵌入拼接
-        combined_embedding = torch.cat([occupation_embedding.expand(len(path_embeddings), -1), path_embeddings], dim=1)
-
-        # 预测最终匹配度
-        match_prob = self.final_predictor(combined_embedding)
-
-        return match_prob.squeeze()
-
-
-# 用于测试的简单模型
-def create_test_model(num_skills=35, num_occupation_features=10):
-    """
-    创建一个用于测试的简单模型
-
-    参数:
-        num_skills (int): 技能数量
-        num_occupation_features (int): 职业特征数量
-
-    返回:
-        SkillMatchingModel: 技能匹配模型
-    """
-    # 假设每个技能有10个特征
-    skill_input_dim = 10
-    occupation_input_dim = num_occupation_features
-
-    model = SkillMatchingModel(
-        skill_input_dim=skill_input_dim,
-        occupation_input_dim=occupation_input_dim,
-        hidden_dim=64,
-        embedding_dim=32,
-        num_gnn_layers=2,
-        num_mlp_layers=2,
-        dropout=0.1,
-        gnn_type="gat",
-        focal_alpha=0.25,
-        focal_gamma=2.0,
-    )
-
-    return model
-
 
 def get_device(device_str=None):
     """
@@ -701,52 +613,3 @@ def get_device(device_str=None):
         return torch.device("cuda")
     else:
         return torch.device("cpu")
-
-
-if __name__ == "__main__":
-    # 测试模型
-    import numpy as np
-
-    # 获取设备
-    device = get_device()
-    print(f"使用设备: {device}")
-
-    # 创建一个简单的技能图
-    num_skills = 35
-    num_occupation_features = 10
-
-    # 随机生成技能特征
-    skill_features = torch.randn(num_skills, 10).to(device)
-
-    # 随机生成边索引 (假设每个技能与其他3个技能相连)
-    edge_index = []
-    for i in range(num_skills):
-        # 随机选择3个不同的技能
-        connected_skills = np.random.choice([j for j in range(num_skills) if j != i], size=3, replace=False)
-        for j in connected_skills:
-            edge_index.append([i, j])
-
-    edge_index = torch.tensor(edge_index, dtype=torch.long).t().contiguous().to(device)
-
-    # 随机生成边特征 (假设每条边有1个特征)
-    edge_attr = torch.randn(edge_index.size(1), 1).to(device)
-
-    # 创建技能图
-    skill_graph = Data(x=skill_features, edge_index=edge_index, edge_attr=edge_attr)
-
-    # 随机生成职业特征
-    batch_size = 4
-    occupation_features = torch.randn(batch_size, num_occupation_features).to(device)
-
-    # 创建模型
-    model = create_test_model(num_skills, num_occupation_features).to(device)
-
-    # 设置技能图
-    model.skill_graph = skill_graph
-
-    # 前向传播
-    match_prob, loss = model(occupation_features, torch.randint(0, num_skills, (batch_size,)))
-
-    print(f"匹配概率形状: {match_prob.shape}")
-    print(f"匹配概率: {match_prob}")
-    print(f"损失: {loss}")

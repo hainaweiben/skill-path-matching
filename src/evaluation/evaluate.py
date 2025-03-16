@@ -62,16 +62,27 @@ def evaluate_model(model, data_loader, threshold=0.5, device=None):
             if isinstance(batch, dict):
                 occupation_features = batch["occupation_features"].to(device)
                 skill_idx = batch["skill_idx"].to(device)
+                skill_paths = batch.get("skill_path", None)
+                path_lengths = batch.get("path_length", None)
                 labels = batch["match"].to(device)
             else:
                 # 如果batch是元组而不是字典
-                occupation_features, skill_idx, labels, _, _ = batch
+                occupation_features, skill_idx, skill_paths, path_lengths, labels, _, _ = batch
                 occupation_features = occupation_features.to(device)
                 skill_idx = skill_idx.to(device)
+                if skill_paths is not None:
+                    skill_paths = skill_paths.to(device)
+                if path_lengths is not None:
+                    path_lengths = path_lengths.to(device)
                 labels = labels.to(device)
 
             # 前向传播
-            scores, _ = model(occupation_features, skill_idx)
+            scores, _ = model(
+                occupation_features, 
+                skill_idx,
+                skill_paths=skill_paths,
+                path_lengths=path_lengths
+            )
 
             # 保存预测结果
             preds = (scores > threshold).float()
@@ -134,7 +145,6 @@ def main():
         num_gnn_layers=config["model"]["num_gnn_layers"],
         num_mlp_layers=config["model"]["num_mlp_layers"],
         dropout=config["model"]["dropout"],
-        gnn_type=config["model"]["gnn_type"],
         focal_alpha=config.get("model", {}).get("focal_alpha", 0.25),
         focal_gamma=config.get("model", {}).get("focal_gamma", 2.0),
     )

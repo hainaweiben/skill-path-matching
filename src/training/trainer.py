@@ -151,17 +151,27 @@ class Trainer:
         with torch.no_grad():
             for batch in pbar:
                 # 解包批次数据
-                occupation_features, skill_idx, match, importance, level = batch
+                occupation_features, skill_idx, skill_path, path_length, match, importance, level = batch
 
                 # 将数据移动到设备
                 occupation_features = occupation_features.to(self.device)
                 skill_idx = skill_idx.to(self.device)
+                skill_path = skill_path.to(self.device)
+                path_length = path_length.to(self.device)
                 match = match.to(self.device)
                 importance = importance.to(self.device)
                 level = level.to(self.device)
 
                 # 前向传播
-                preds, loss = self.model(occupation_features, skill_idx, match, importance, level)
+                preds, loss = self.model(
+                    occupation_features, 
+                    skill_idx, 
+                    skill_paths=skill_path,
+                    path_lengths=path_length,
+                    match=match, 
+                    importance=importance, 
+                    level=level
+                )
 
                 # 更新总损失
                 total_loss += loss.item()
@@ -311,11 +321,13 @@ class Trainer:
             dict: 准备好的批次数据
         """
         # 解包批次数据
-        occupation_features, skill_idx, match, importance, level = batch
+        occupation_features, skill_idx, skill_path, path_length, match, importance, level = batch
 
         # 将数据移动到设备
         occupation_features = occupation_features.to(self.device)
         skill_idx = skill_idx.to(self.device)
+        skill_path = skill_path.to(self.device)
+        path_length = path_length.to(self.device)
         match = match.to(self.device)
         importance = importance.to(self.device)
         level = level.to(self.device)
@@ -323,6 +335,8 @@ class Trainer:
         return {
             "occupation_features": occupation_features,
             "skill_idx": skill_idx,
+            "skill_path": skill_path,
+            "path_length": path_length,
             "match": match,
             "importance": importance,
             "level": level,
@@ -340,7 +354,13 @@ class Trainer:
         """
         # 前向传播
         outputs, loss = self.model(
-            inputs["occupation_features"], inputs["skill_idx"], inputs["match"], inputs["importance"], inputs["level"]
+            inputs["occupation_features"], 
+            inputs["skill_idx"], 
+            skill_paths=inputs["skill_path"],
+            path_lengths=inputs["path_length"],
+            match=inputs["match"], 
+            importance=inputs["importance"], 
+            level=inputs["level"]
         )
 
         return outputs, loss
