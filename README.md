@@ -95,7 +95,20 @@ bash src/data_processing/scripts/process_data.sh
 ```
 3. 处理后的数据将保存在`data/processed/`目录
 
-## 模型训练
+## 使用说明
+
+### 1. 数据处理
+首先需要处理原始数据并构建数据集：
+
+```bash
+# 处理原始数据
+python src/data_processing/process_data.py
+
+# 构建数据集（包括技能图构建等）
+python src/data_processing/build_dataset.py
+```
+
+### 2. 模型训练
 
 使用项目的主运行脚本进行训练：
 
@@ -109,7 +122,7 @@ bash src/data_processing/scripts/process_data.sh
 - 训练配置（config.yaml）
 - TensorBoard事件文件
 
-## 模型评估
+### 3. 模型评估
 
 使用项目的主运行脚本进行评估：
 
@@ -120,6 +133,14 @@ bash src/data_processing/scripts/process_data.sh
 评估结果将保存在`outputs/evaluation_[时间戳]`目录中，包括：
 - 评估指标（准确率、精确率、召回率、F1分数、AUC等）
 - 预测结果CSV文件
+
+### 4. 项目清理
+
+如需清理项目（删除缓存文件、旧的输出目录等）：
+
+```bash
+bash cleanup.sh
+```
 
 ## 当前版本
 
